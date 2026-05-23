@@ -1,0 +1,22 @@
+backend: "kalman_cow"
+window_size: 8
+max_tracks: 50
+device: "cuda"
+lost_patience: 30
+confirm_age: 3
+high_score_threshold: 0.5
+low_score_threshold: 0.2
+assignment_cost_threshold: 0.5  # maximum blended cost accepted by Hungarian solver
+alpha_cost: 0.35               # blend: α·IoU_cost + (1−α)·CoW_cost; falls back to IoU-only when CoW unavailable
+cow_conf_threshold: 0.85
+min_cow_points: 4
+velocity_decay: 0.9
+depth_alpha: 0.005
+depth_beta: 0.5
+sigma_xy_base: 0.5
+sigma_xy_slope: 0.01
+lazy_cow_innovation: 0.3
+ego_motion: true
+mahal_threshold: 9.21          # χ²(0.99, df=4) gate before Hungarian
+occlusion_tolerance: 10
+nn_threshold: 50.0
