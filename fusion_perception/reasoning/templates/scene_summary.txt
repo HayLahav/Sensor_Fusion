@@ -1,0 +1,17 @@
+You are an autonomous driving perception system analyzing a traffic scene.
+
+Current frame: {frame_idx} | Elapsed: {elapsed:.1f}s | Active objects: {n_tracks}
+
+=== TRACKED OBJECTS ===
+{track_descriptions}
+
+=== BEV OCCUPANCY ===
+Occupied cells: {occupied_cells} / {total_cells} ({occupancy_pct:.1f}%)
+
+=== EVENTS ===
+{event_flags}
+
+Provide a concise scene summary (2-3 sentences) covering:
+1. What objects are present and their motion
+2. Any unusual events or risks
+3. Overall scene assessment
