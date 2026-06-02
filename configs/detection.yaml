@@ -1,0 +1,5 @@
+checkpoint: "ckpt/wilddet3d_alldata_all_prompt_v1.0.pt"
+prompts: ["car", "person", "cyclist"]
+score_threshold: 0.4
+fp16: true
+device: "cuda"

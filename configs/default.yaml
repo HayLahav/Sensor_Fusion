@@ -1,0 +1,94 @@
+run_id: null  # auto-generated from timestamp if null
+
+video:
+  source: "data/sample_videos/clip.mp4"
+  max_frames: null  # null = process entire video
+  resize_hw: [480, 640]  # [H, W] resize before detection
+
+frustum:
+  model_id: "yolo26n.pt"         # yolo26s.pt / yolo26m.pt for better recall
+  seg_model_id: "yolo26n-seg.pt" # instance seg to separate clustered vehicles; set null to disable
+  use_keypoints: false           # ApolloCar3D keypoint yaw — disabled: openpifpaf has no Python 3.12 wheels
+  score_threshold: 0.30
+  min_frustum_pts: 5             # fewer pts → falls back to class-typical dims
+  device: "cuda"
+
+centerpoint:                  # kept for reference; not used when frustum detector is active
+  checkpoint: "ckpt/centerpoint_kitti_3class.pth"
+  score_threshold: 0.30
+  device: "cuda"
+
+tracking:
+  backend: "kalman_cow"          # "cowtracker" | "kalman_cow"
+  window_size: 8
+  max_tracks: 50
+  device: "cuda"
+
+  # KalmanCoWTracker-specific
+  lost_patience: 50              # frames before deleting a LOST track
+  confirm_age: 2                 # TENTATIVE frames needed to become CONFIRMED
+  high_score_threshold: 0.45     # ByteTrack: associate + init new tracks (0.45 suits YOLO confidence range; CenterPoint used 0.70)
+  low_score_threshold: 0.2       # ByteTrack: associate with existing only
+  assignment_cost_threshold: 0.75 # raised from 0.65: looser gate reduces spurious new tracks
+  alpha_cost: 0.35               # blend: α·IoU_cost + (1−α)·3D_distance_cost
+  cow_conf_threshold: 0.85       # CoWTracker visibility gate
+  min_cow_points: 4              # min surviving points to use CoW measurement
+  velocity_decay: 0.9            # γ^k velocity decay for LOST tracks
+  depth_alpha: 0.005             # depth-aware measurement noise (z in metres): σ_z = depth_alpha·z² + depth_beta
+  depth_beta: 0.5
+  sigma_xy_base: 0.5             # lateral/vertical base noise (metres)
+  sigma_xy_slope: 0.01           # scales with depth
+  lazy_cow_innovation: 0.3       # skip CoW if ||ν|| below this threshold
+  ego_motion: true               # enable ORB homography compensation
+  mahal_threshold: 13.28         # χ²(0.99, df=4); was 9.21 which is df=2
+  # legacy CoWTrackerWrapper params (still used if backend="cowtracker")
+  occlusion_tolerance: 10
+  nn_threshold: 50.0
+
+depth:
+  enabled: true               # set true to activate DA-V2 + LiDAR anchoring
+  model_size: "small"         # "small" | "base" | "large" (small ≈ 100 MB VRAM)
+  max_depth: 80.0             # metres — depth values above this are clamped
+  device: "cuda"
+  quality_gate:
+    enabled: true
+    use_clip_iqa: false       # true = CLIP-IQA (accurate), false = fast Laplacian+luminance
+    min_score: 0.30           # frames below this score skip depth estimation
+  lidar_anchor:
+    enabled: true             # refine per-detection depth from LiDAR frustums
+    global_scale: true        # correct global scale via median(z_lidar/z_mono)
+    min_frustum_points: 5     # min LiDAR pts in 2D box to use frustum depth
+    scale_clamp: [0.5, 2.0]  # allowed range for global scale factor
+  reconstruction:
+    enabled: false            # accumulate rolling world-frame point cloud
+    rolling_frames: 10        # how many frames to keep in the buffer
+    stride: 4                 # pixel stride when unprojecting depth map
+
+occupancy:
+  resolution: 0.5             # meters per BEV cell
+  x_range: [-25.0, 25.0]     # lateral range in meters
+  z_range: [-10.0, 60.0]     # forward range in meters (negative = behind ego)
+  decay_factor: 0.95          # per-frame exponential decay
+  lidar_confidence: 0.6    # LiDAR-only cell confidence level
+
+reasoning:
+  enabled: true
+  interval_frames: 30         # run Gemma every N frames
+  visual_mode: true           # send rolling window of annotated frames to Gemma
+  rolling_frames: 3           # frames in visual window (oldest→newest)
+  visual_token_budget: 70     # tokens per image: 70|140|280|560|1120
+  model_id: "google/gemma-4-E2B-IT"
+  quantize_4bit: true
+  max_new_tokens: 120
+  device: "cuda"
+
+output:
+  base_dir: "outputs"
+  flush_interval: 100         # write JSON every N frames
+  save_video: true
+  video_fps: null             # null = match input fps
+
+logging:
+  level: "INFO"
+  log_file: null
+  use_rich: true
