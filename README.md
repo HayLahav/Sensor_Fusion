@@ -11,7 +11,9 @@ Each frame is a 4-panel composite: **camera view** (3D boxes + track IDs) · **B
 
 ![captioned frame 100](docs/assets/captioned_000100.jpg)
 
-> *Summary: "Four stationary cars near the road edge." - Gemma 4 2B-IT*
+> *Summary: "Four stationary cars near the road edge."
+> Caution: Maintain a safe distance from the stationary vehicles."
+> *Summary: "Maintain speed, watch the stationary vehicles."- Gemma 4 2B-IT*
 
 ---
 
