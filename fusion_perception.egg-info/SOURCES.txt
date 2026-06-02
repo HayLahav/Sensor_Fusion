@@ -1,6 +1,0 @@
-setup.py
-fusion_perception/__init__.py
-fusion_perception.egg-info/PKG-INFO
-fusion_perception.egg-info/SOURCES.txt
-fusion_perception.egg-info/dependency_links.txt
-fusion_perception.egg-info/top_level.txt
