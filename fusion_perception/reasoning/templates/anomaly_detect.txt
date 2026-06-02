@@ -1,0 +1,7 @@
+Review the following perception data and identify any anomalies or safety-relevant events.
+
+Events detected: {event_flags}
+Active tracks: {n_tracks}
+Track details: {track_descriptions}
+
+List any anomalies as a bullet list. If none, say "No anomalies detected."
