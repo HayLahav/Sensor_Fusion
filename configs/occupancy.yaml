@@ -1,4 +1,0 @@
-resolution: 0.5
-x_range: [-20.0, 20.0]
-z_range: [0.0, 50.0]
-decay_factor: 0.95

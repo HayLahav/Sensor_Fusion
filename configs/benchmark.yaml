@@ -1,9 +1,0 @@
-# This file contains benchmark-specific settings.
-# Merge with default.yaml before use:
-#   OmegaConf.merge(OmegaConf.load("configs/default.yaml"), OmegaConf.load("configs/benchmark.yaml"))
-benchmark:
-  datasets: [kitti-360, waymo]
-  logs_per_dataset: 3
-  iou_threshold: 0.5
-  camera_name: camera
-  output_dir: outputs/benchmark

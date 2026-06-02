@@ -1,7 +1,0 @@
-enabled: true
-interval_frames: 30
-visual_mode: false
-model_id: "google/gemma-4-2b-it"
-quantize_4bit: true
-max_new_tokens: 256
-device: "cuda"
