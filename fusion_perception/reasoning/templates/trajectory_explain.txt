@@ -1,6 +1,0 @@
-Describe the motion of each tracked object in plain English.
-
-{track_descriptions}
-
-For each object, describe: direction of travel, approximate speed, and predicted near-term path.
-Keep each description to one sentence.
