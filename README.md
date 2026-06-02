@@ -4,15 +4,14 @@ A multi-sensor autonomous driving perception pipeline that fuses monocular camer
 
 ---
 
-## Results — KITTI-360 Drive `2013_05_28_drive_0000_sync`
-
+## Results — KITTI-360 Drive 
 ### Annotated composite (frame 100) — with Gemma scene caption
 
 Each frame is a 4-panel composite: **camera view** (3D boxes + track IDs) · **BEV occupancy grid** · **depth map** · **semantic segmentation**.
 
 ![captioned frame 100](docs/assets/captioned_000100.jpg)
 
-> *Summary: "Four stationary cars near the road edge." — Gemma 4 2B-IT*
+> *Summary: "Four stationary cars near the road edge." - Gemma 4 2B-IT*
 
 ---
 
