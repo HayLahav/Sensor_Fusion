@@ -17,13 +17,13 @@ Each frame is a 4-panel composite: **camera view** (3D boxes + track IDs) · **B
 
 ---
 
-### Raw composite (frame 300) — detection + tracking + BEV
+### Raw composite (frame 300) - detection + tracking + BEV
 
 ![frame 300](docs/assets/frame_000300.jpg)
 
 ---
 
-### LiDAR world map — top-down BEV accumulated over full drive
+### LiDAR world map - top-down BEV accumulated over full drive
 
 ![top-down LiDAR map](docs/assets/map_topdown.png)
 
