@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 import argparse
 import datetime
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -171,7 +172,12 @@ def main() -> int:
             calib = load_calibration(kitti_root)
             print(f"[inference] Calibration: {type(calib).__name__}")
             if args.kitti360_root:
-                lidar_seq = Kitti360Lidar.from_dir(kitti_root)
+                # Point at the requested drive: data_3d_raw/* would pick the
+                # first drive on disk, whichever sequence was asked for.
+                seq_dir = os.path.join(kitti_root, "data_3d_raw", args.kitti360_seq or "")
+                lidar_seq = Kitti360Lidar.from_dir(
+                    seq_dir if args.kitti360_seq and os.path.isdir(seq_dir) else kitti_root
+                )
             else:
                 lidar_seq = KittiRawLidar.from_dir(kitti_root)
             print(f"[inference] LiDAR: {len(lidar_seq._files)} frames")
@@ -224,6 +230,10 @@ def main() -> int:
         mahal_threshold=cfg.tracking.mahal_threshold,
         lazy_cow_innovation=cfg.tracking.lazy_cow_innovation,
         device=cfg.tracking.device,
+        motion_gate=cfg.tracking.get("motion_gate", True),
+        motion_gate_min_obs_lidar=cfg.tracking.get("motion_gate_min_obs_lidar", 5),
+        motion_gate_min_obs_box=cfg.tracking.get("motion_gate_min_obs_box", 10),
+        motion_gate_static_speed=cfg.tracking.get("motion_gate_static_speed", 1.0),
     )
     tracker.load()
     if hasattr(tracker, "cow_active"):
@@ -310,6 +320,23 @@ def main() -> int:
             )
         print("[inference] Depth pipeline loaded (DA-V2 + LiDAR anchor)")
 
+    # ── Utonia LiDAR semantics (optional) ─────────────────────────────────────
+    lidar_segmenter = None
+    ls_cfg = cfg.get("lidar_semantics", None)
+    if ls_cfg is not None and ls_cfg.get("enabled", False) and calib is not None:
+        from fusion_perception.segmentation.lidar_probe import LidarSemanticSegmenter
+        try:
+            lidar_segmenter = LidarSemanticSegmenter(
+                probe_path=ls_cfg.probe_path,
+                device=ls_cfg.get("device", "cuda"),
+                encoder_overrides={"enable_flash": bool(ls_cfg.get("enable_flash", False))},
+            )
+            lidar_segmenter.load()
+            print("[inference] Utonia LiDAR semantics loaded")
+        except Exception as e:
+            lidar_segmenter = None
+            print(f"[inference] WARNING: Utonia LiDAR semantics disabled: {e}")
+
     log_gpu_memory("Pass-1 models loaded")
 
     fusion_iou_thr = 0.25
@@ -329,6 +356,8 @@ def main() -> int:
         depth_quality_gate=depth_quality_gate,
         lidar_anchor=lidar_anchor_obj,
         point_cloud_acc=point_cloud_acc,
+        calib=calib,
+        lidar_segmenter=lidar_segmenter,
     )
 
     resize_hw = list(cfg.video.resize_hw) if cfg.video.resize_hw else None
@@ -397,15 +426,17 @@ def main() -> int:
 
     for frame_idx, frame_rgb, meta in loader:
         try:
-            lidar_pts = None
+            lidar_pts = lidar_velo = None
             if calib is not None and lidar_seq is not None:
                 lp = lidar_seq.get_path(frame_idx)
                 if lp:
-                    lidar_pts = calib.velo_to_cam(load_bin(lp))
+                    lidar_velo = load_bin(lp)
+                    lidar_pts = calib.velo_to_cam(lidar_velo)
 
             T_ego = ego_comp.get_transform(frame_idx) if ego_comp is not None else None
             outputs = runner.run_frame(frame_rgb, frame_idx, intrinsics=K,
-                                       lidar_pts=lidar_pts, T_ego=T_ego)
+                                       lidar_pts=lidar_pts, lidar_pts_velo=lidar_velo,
+                                       T_ego=T_ego)
             all_detections[frame_idx] = outputs["detections"]
             for t in outputs["tracks"]:
                 all_tracks[t.track_id] = t

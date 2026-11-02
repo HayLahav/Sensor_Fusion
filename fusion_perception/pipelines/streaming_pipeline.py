@@ -78,6 +78,10 @@ class StreamingPipeline:
                 mahal_threshold=cfg.tracking.get("mahal_threshold", 9.21),
                 lazy_cow_innovation=cfg.tracking.get("lazy_cow_innovation", 0.3),
                 device=cfg.tracking.device,
+                motion_gate=cfg.tracking.get("motion_gate", True),
+                motion_gate_min_obs_lidar=cfg.tracking.get("motion_gate_min_obs_lidar", 5),
+                motion_gate_min_obs_box=cfg.tracking.get("motion_gate_min_obs_box", 10),
+                motion_gate_static_speed=cfg.tracking.get("motion_gate_static_speed", 1.0),
             )
         else:
             tracker = CoWTrackerWrapper(

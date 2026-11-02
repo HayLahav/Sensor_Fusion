@@ -11,6 +11,11 @@ Depth pipeline (when depth_estimator is supplied):
   5. PointCloudAccumulator (optional) → dense world point cloud
 
 Fallback (depth_estimator=None): WildDet3D depth, no correction.
+
+LiDAR object positions (when raw LiDAR + calibration are supplied):
+  6. Optional Utonia LiDAR semantics → per-point classes
+  7. lidar_object_centroids → each detection's median LiDAR position, used by
+     the tracker's motion gate (static vs moving)
 """
 from __future__ import annotations
 import numpy as np
@@ -35,6 +40,7 @@ if TYPE_CHECKING:
     from fusion_perception.depth.quality_gate import DepthQualityGate
     from fusion_perception.depth.lidar_anchor import LidarDepthAnchor
     from fusion_perception.depth.reconstruction import PointCloudAccumulator
+    from fusion_perception.segmentation.lidar_probe import LidarSemanticSegmenter
 
 logger = get_logger("stage_runner")
 
@@ -60,6 +66,9 @@ class StageRunner:
         depth_quality_gate: "Optional[DepthQualityGate]" = None,
         lidar_anchor: "Optional[LidarDepthAnchor]" = None,
         point_cloud_acc: "Optional[PointCloudAccumulator]" = None,
+        lidar_segmenter: "Optional[LidarSemanticSegmenter]" = None,
+        yolo26_detector: object = None,
+        fusion_iou_threshold: float = 0.25,
     ) -> None:
         self.detector = detector                      # WildDet3D / CenterPoint (3D geometry)
         self.tracker = tracker
@@ -77,6 +86,14 @@ class StageRunner:
         self.depth_quality_gate = depth_quality_gate  # frame quality filter
         self.lidar_anchor = lidar_anchor              # LiDAR depth correction
         self.point_cloud_acc = point_cloud_acc        # rolling world point cloud
+        self.lidar_segmenter = lidar_segmenter        # Utonia + linear probe
+        # Accepted for compatibility with inference.py; 2D YOLO26 fusion is not
+        # wired into this StageRunner yet.
+        self.yolo26_detector = yolo26_detector
+        self.fusion_iou_threshold = fusion_iou_threshold
+        if yolo26_detector is not None:
+            logger.warning("StageRunner: yolo26_detector given but YOLO26 2D fusion "
+                           "is not implemented in this StageRunner; ignoring it.")
         self._last_reasoning: Optional[ReasoningOutput] = None
         self._sem_mask: Optional[np.ndarray] = None
         self._gemma_memory = GemmaMemoryBuffer(maxlen=5)
@@ -138,6 +155,18 @@ class StageRunner:
         if depth_map is not None and self.lidar_anchor is not None and intrinsics is not None:
             detections = self.lidar_anchor.anchor_detections(
                 detections, depth_map, lidar_pts, intrinsics
+            )
+
+        # ── LiDAR semantics + per-object LiDAR position (motion gate input) ──
+        lidar_labels: Optional[np.ndarray] = None
+        if lidar_pts_velo is not None and hasattr(self.calib, "velo_to_cam_all"):
+            from fusion_perception.utils.lidar_object import lidar_object_centroids
+
+            pts_cam_all = self.calib.velo_to_cam_all(lidar_pts_velo)
+            if self.lidar_segmenter is not None:
+                lidar_labels = self.lidar_segmenter.predict(lidar_pts_velo[:, :3])
+            detections = lidar_object_centroids(
+                detections, pts_cam_all, intrinsics, labels=lidar_labels,
             )
 
         # ── Tracking ─────────────────────────────────────────────────────────
@@ -215,4 +244,5 @@ class StageRunner:
             "composite": composite_img,
             "static_events": static_events,
             "depth_map": depth_map,
+            "lidar_labels": lidar_labels,
         }

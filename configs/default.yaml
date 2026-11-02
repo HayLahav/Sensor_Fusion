@@ -41,6 +41,12 @@ tracking:
   lazy_cow_innovation: 0.3       # skip CoW if ||ν|| below this threshold
   ego_motion: true               # enable ORB homography compensation
   mahal_threshold: 13.28         # χ²(0.99, df=4); was 9.21 which is df=2
+  # Motion gate: hold velocity at zero until a track's ego-compensated
+  # positions show real motion (fixes parked cars flagged as moving).
+  motion_gate: true
+  motion_gate_min_obs_lidar: 5    # observations needed when LiDAR centroids exist
+  motion_gate_min_obs_box: 10     # observations needed with box centres only (noisier)
+  motion_gate_static_speed: 1.0   # m/s ground-plane speed below which a track is static
   # legacy CoWTrackerWrapper params (still used if backend="cowtracker")
   occlusion_tolerance: 10
   nn_threshold: 50.0
@@ -92,3 +98,14 @@ logging:
   level: "INFO"
   log_file: null
   use_rich: true
+
+# Utonia LiDAR semantics (optional). Train the probe first:
+#   python scripts/train_utonia_probe.py --kitti360-root /data/KITTI-360 \
+#       --seq 2013_05_28_drive_0000_sync --out ckpt/utonia_probe.pt
+# Per-point classes are used to pick each detection's own LiDAR points
+# (car points, not ground/background) for the tracker's motion gate.
+lidar_semantics:
+  enabled: false
+  probe_path: "ckpt/utonia_probe.pt"
+  enable_flash: false   # true only on Ampere+ GPUs with flash-attn installed
+  device: "cuda"

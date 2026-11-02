@@ -32,6 +32,9 @@ class TrackState:
     centroid_history: list[list[float]] = field(default_factory=list)
     position_3d_history: list[list[float]] = field(default_factory=list)
     innovation_norm: float = 0.0      # ||z - Hx||, used for lazy CoW gate
+    motion_obs: list = field(default_factory=list)   # [MotionObservation], ego-warped each frame
+    motion_state: str = "unknown"     # "unknown" | "static" | "moving"
+    motion_speed: Optional[float] = None
 
     def to_track(self) -> Track:
         """Convert to the shared Track dataclass used by downstream stages."""
@@ -64,4 +67,5 @@ class TrackState:
             last_box_2d=list(self.last_bbox2d) if self.last_bbox2d is not None else None,
             last_box_3d=box3d,
             velocity_3d=vel,
+            motion_state=self.motion_state,
         )

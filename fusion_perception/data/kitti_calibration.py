@@ -37,12 +37,16 @@ class KittiRawCalib:
         logger.info("KittiRawCalib loaded")
         return cls(R, T, R_rect)
 
+    def velo_to_cam_all(self, pts: np.ndarray) -> np.ndarray:
+        """[N,3] LiDAR → rectified camera frame [N,3], every point (index-aligned)."""
+        ones = np.ones((len(pts), 1), dtype=np.float32)
+        pts_h = np.concatenate([pts[:, :3].astype(np.float32), ones], axis=1)
+        cam = (self._T @ pts_h.T).T[:, :3]
+        return (self._R_rect @ cam.T).T
+
     def velo_to_cam(self, pts: np.ndarray) -> np.ndarray:
         """[N,3] LiDAR → rectified camera frame [N,3], front-facing only."""
-        ones = np.ones((len(pts), 1), dtype=np.float32)
-        pts_h = np.concatenate([pts.astype(np.float32), ones], axis=1)
-        cam = (self._T @ pts_h.T).T[:, :3]
-        rect = (self._R_rect @ cam.T).T
+        rect = self.velo_to_cam_all(pts)
         return rect[rect[:, 2] > 0.1]
 
 
@@ -113,10 +117,14 @@ class Kitti360Calib:
         logger.warning("Kitti360Calib: calib_cam_to_velo.txt not found, using velo≈pose approximation")
         return cls(T, T_pose_to_cam, R_rect)
 
-    def velo_to_cam(self, pts: np.ndarray) -> np.ndarray:
+    def velo_to_cam_all(self, pts: np.ndarray) -> np.ndarray:
+        """[N,3] LiDAR → rectified camera frame [N,3], every point (index-aligned)."""
         ones = np.ones((len(pts), 1), dtype=np.float32)
-        pts_h = np.concatenate([pts.astype(np.float32), ones], axis=1)
-        cam = (self._T @ pts_h.T).T[:, :3]
+        pts_h = np.concatenate([pts[:, :3].astype(np.float32), ones], axis=1)
+        return (self._T @ pts_h.T).T[:, :3]
+
+    def velo_to_cam(self, pts: np.ndarray) -> np.ndarray:
+        cam = self.velo_to_cam_all(pts)
         return cam[cam[:, 2] > 0.1]
 
 

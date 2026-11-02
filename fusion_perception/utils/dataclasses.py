@@ -24,6 +24,10 @@ class Detection3D:
     centroid_2d: list[float]     # [x, y] pixels — center of box_2d
     centroid_3d: list[float]     # [x, y, z] camera coords
     depth: float                 # estimated depth in meters
+    # Median of the object's own LiDAR points in rectified camera coords
+    # (set by utils/lidar_object.py when LiDAR is available). Used by the
+    # tracker's motion gate; None when no LiDAR support.
+    lidar_centroid_3d: Optional[list[float]] = None
 
 
 @dataclass_json
@@ -42,6 +46,7 @@ class Track:
     last_box_2d: Optional[list[float]] = None  # [x1,y1,x2,y2] last matched detection
     last_box_3d: Optional[list[float]] = None  # [cx,cy,cz,w,h,l,ry] KF-smoothed
     velocity_3d: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])  # [vx,vy,vz] m/s ego-compensated
+    motion_state: str = "unknown"              # "unknown" | "static" | "moving" (tracker motion gate)
 
 
 @dataclass_json

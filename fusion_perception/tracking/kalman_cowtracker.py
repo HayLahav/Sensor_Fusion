@@ -11,6 +11,11 @@ Per-frame flow:
   7. LOST tracks vs remaining low dets
   8. Spawn new tracks for unmatched high-conf detections only
   9. Prune LOST tracks exceeding lost_patience
+
+Motion gate (motion_gate.py): each track's measured positions are ego-warped
+alongside the KF state. Velocity is held at zero until those positions show
+real ground-plane motion, so newly appearing parked cars are not labelled
+as moving because of noisy first measurements.
 """
 from __future__ import annotations
 import numpy as np
@@ -28,6 +33,9 @@ from fusion_perception.tracking.association import (
     build_cost_matrix, mahalanobis_gate, hungarian_match
 )
 from fusion_perception.tracking.centroid_anchor import assign_new_track_id
+from fusion_perception.tracking.motion_gate import (
+    MotionObservation, warp_observations, classify_motion, MOVING,
+)
 from fusion_perception.utils.dataclasses import Detection3D, Track
 from fusion_perception.utils.geometry import wrap_angle
 from fusion_perception.utils.logging_setup import get_logger
@@ -56,6 +64,11 @@ class KalmanCoWTracker(BaseTracker):
         ego_motion: bool = True,
         mahal_threshold: float = 13.28,   # χ²(0.99, df=4) — gates on [cx,cy,cz,θ]
         device: str = "cuda",
+        motion_gate: bool = True,
+        motion_gate_min_obs_lidar: int = 5,
+        motion_gate_min_obs_box: int = 10,
+        motion_gate_static_speed: float = 1.0,
+        motion_gate_window: int = 20,
     ) -> None:
         self.window_size = window_size
         self.max_tracks = max_tracks
@@ -72,6 +85,11 @@ class KalmanCoWTracker(BaseTracker):
         self.ego_motion = ego_motion
         self.mahal_threshold = mahal_threshold
         self.device = device
+        self.motion_gate = motion_gate
+        self.motion_gate_min_obs_lidar = motion_gate_min_obs_lidar
+        self.motion_gate_min_obs_box = motion_gate_min_obs_box
+        self.motion_gate_static_speed = motion_gate_static_speed
+        self.motion_gate_window = motion_gate_window
 
         self._cow_model = None
         self._tracks: dict[int, TrackState] = {}
@@ -220,6 +238,37 @@ class KalmanCoWTracker(BaseTracker):
         for ts in self._tracks.values():
             ts.kf.x[:3, 0]  = R @ ts.kf.x[:3, 0] + t
             ts.kf.x[7:10, 0] = R @ ts.kf.x[7:10, 0]
+            warp_observations(ts.motion_obs, T_ego)
+
+    def _record_motion(self, ts: TrackState, det: Detection3D, frame_idx: int) -> None:
+        """Store this frame's measured position (LiDAR median if available)."""
+        if det.lidar_centroid_3d is not None:
+            pos, src = det.lidar_centroid_3d, "lidar"
+        else:
+            pos, src = det.box_3d[:3], "box"
+        ts.motion_obs.append(
+            MotionObservation(frame_idx, np.asarray(pos, dtype=np.float64), src)
+        )
+        if len(ts.motion_obs) > self.motion_gate_window:
+            del ts.motion_obs[: len(ts.motion_obs) - self.motion_gate_window]
+
+    def _apply_motion_gate(self, ts: TrackState) -> None:
+        """Hold KF velocity at zero unless the track is shown to be moving."""
+        ts.motion_state, ts.motion_speed = classify_motion(
+            ts.motion_obs, self._fps,
+            min_obs_lidar=self.motion_gate_min_obs_lidar,
+            min_obs_box=self.motion_gate_min_obs_box,
+            static_speed=self.motion_gate_static_speed,
+        )
+        if not self.motion_gate or ts.motion_state == MOVING:
+            return
+        # Static or not yet known: zero velocity and its correlation with
+        # position, and keep its variance modest so one noisy measurement
+        # cannot create a large velocity.
+        ts.kf.x[7:10, 0] = 0.0
+        ts.kf.P[7:10, :7] = 0.0
+        ts.kf.P[:7, 7:10] = 0.0
+        ts.kf.P[7:10, 7:10] = np.eye(3) * min(1.0, float(ts.kf.P[7, 7]))
 
     def _predict_all(self, dt: float) -> None:
         for ts in self._tracks.values():
@@ -379,6 +428,9 @@ class KalmanCoWTracker(BaseTracker):
             ts.cow_points_abs = spawn_points(det.box_2d)
             ts.last_bbox2d = det.box_2d
 
+        self._record_motion(ts, det, frame_idx)
+        self._apply_motion_gate(ts)
+
         ts.last_box3d = ts.kf.x[:7, 0].copy()
         ts.last_seen = frame_idx
         ts.miss_count = 0
@@ -430,5 +482,6 @@ class KalmanCoWTracker(BaseTracker):
             centroid_history=[det.centroid_2d],
             position_3d_history=[det.centroid_3d],
         )
+        self._record_motion(ts, det, frame_idx)
         self._tracks[new_id] = ts
         logger.debug(f"New track {new_id}: {det.class_name} @ z={det.centroid_3d[2]:.1f}m")

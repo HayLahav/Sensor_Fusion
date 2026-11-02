@@ -73,7 +73,9 @@ Video / KITTI-360 sequence
 | 3D Detector | `fusion_perception/models/wilddet3d_wrapper.py` | [WildDet3D](https://github.com/allenai/WildDet3D) — open-vocabulary monocular 3D detection via text prompts |
 | 2D Detector | `fusion_perception/models/yolo26_detector.py` | YOLO26 2D detector fused with WildDet3D boxes via IoU |
 | Tracker | `fusion_perception/tracking/kalman_cowtracker.py` | Kalman filter + [CoWTracker](https://github.com/facebookresearch/co-tracker) visual tracking; ByteTrack two-stage association |
-| Ego-motion | `fusion_perception/tracking/ego_motion.py` | Pose-based 3D ego-motion compensation from KITTI-360 `poses.txt` |
+| Ego-motion | `fusion_perception/tracking/ego_motion.py` | Pose-based 3D ego-motion compensation from KITTI-360 `poses.txt` (missing pose frames interpolated) |
+| Motion gate | `fusion_perception/tracking/motion_gate.py` | Static / moving decision from ego-compensated positions; holds velocity at zero until motion is shown |
+| LiDAR semantics | `fusion_perception/models/utonia_wrapper.py`, `fusion_perception/segmentation/lidar_probe.py` | [Utonia](https://github.com/Pointcept/Utonia) point-cloud encoder + linear probe trained on KITTI-360 labels (optional) |
 | BEV Grid | `fusion_perception/occupancy/bev_grid.py` | Bird's-eye-view occupancy: exponential decay → LiDAR rasterisation → track centroids |
 | Road Segmentor | `fusion_perception/segmentation/road_segmentor.py` | YOLO26n-sem Cityscapes semantic labels projected onto BEV |
 | Depth | `fusion_perception/depth/` | Depth-Anything-V2 monocular depth with LiDAR frustum anchoring and quality gate |
@@ -293,11 +295,29 @@ run.py              # lightweight single-pass CLI entry-point
 - **Try larger YOLO26 variants for better detection recall.**
   The current config uses `yolo26n` (nano) as the 2D detector. Upgrading to `yolo26s` or `yolo26m` should improve recall on small or partially-occluded vehicles at the cost of extra VRAM and inference time. Worth benchmarking against the existing mAP numbers on the KITTI-360 drive.
 
-- **Fix ego-motion false-motion on suddenly-appearing parked cars.**
-  When a stationary vehicle enters the field of view for the first time (e.g. a parked car that was occluded), the pose-based ego-motion compensator applies the ego-vehicle's displacement to its first observation. This makes the car's initial centroid jump, causing the tracker to assign it a non-zero velocity and label it as moving rather than stationary. Possible fixes to explore:
-  - Hold new tracks in `TENTATIVE` state for more frames before committing a velocity estimate, so the initial jump can average out.
-  - Gate velocity initialisation: only set a non-zero velocity if the centroid displacement across the first *N* confirmed frames exceeds a minimum threshold (e.g. 0.5 m).
-  - Use LiDAR-based depth anchoring to verify whether the detection is consistent with a static background point cluster before assigning kinematic state.
+- **Ego-motion false motion on suddenly appearing parked cars — fix in place, needs a KITTI-360 run to confirm.**
+  Two changes:
+  - `PoseEgoCompensation` now interpolates frames missing from `poses.txt` (KITTI-360 leaves out frames, e.g. while the car is stopped). Before, each gap dropped compensation for that frame *and* the next one, so static objects jumped by the ego displacement.
+  - A motion gate in the tracker keeps each track's measured positions, warps them with the same ego transform as the Kalman state, and fits their ground-plane speed. Velocity stays at zero while the track is `unknown` or `static`, so a noisy first box no longer becomes a velocity. Positions come from the object's own LiDAR points (`utils/lidar_object.py`, ≥5 frames) or from box centres when there is no LiDAR (≥10 frames). Tune with `tracking.motion_gate_*` in `configs/default.yaml`.
+
+## Utonia LiDAR semantics (optional)
+
+[Utonia](https://github.com/Pointcept/Utonia) is a pretrained point-cloud encoder (PTv3). It returns one feature vector per LiDAR point, and a linear layer trained on KITTI-360's 3D semantic labels turns those into 13 classes (`segmentation/lidar_classes.py`). In the pipeline the classes pick each detection's own LiDAR points (car points, not road or walls behind it), which makes the motion gate's position input steadier.
+
+```bash
+pip install spconv-cu121
+pip install torch-scatter -f https://data.pyg.org/whl/torch-2.5.1+cu121.html
+pip install git+https://github.com/Pointcept/Utonia
+pip install scipy
+
+python scripts/train_utonia_probe.py \
+    --kitti360-root /data/KITTI-360 --seq 2013_05_28_drive_0000_sync \
+    --variant utonia_small --stride 10 --out ckpt/utonia_probe.pt
+```
+
+Needs `data_3d_semantics/train/<seq>/` and `data_3d_raw/<seq>/` from KITTI-360. KITTI-360 doesn't label single scans, so labels are copied from its accumulated semantic clouds by nearest neighbour. The script reports validation mIoU and a **scan-to-map distance** per sequence: how far each scan lands from KITTI-360's map after the LiDAR→IMU→world transform. That number checks your calibration and poses: a wrong extrinsic shows up as a large median distance. Then set `lidar_semantics.enabled: true`.
+
+Notes: Utonia's weights are CC-BY-NC 4.0 (non-commercial). On a T4 keep `enable_flash: false`. `--scale` sets the voxel size (0.01/scale m) and may need tuning for outdoor LiDAR.
 
 ---
 
