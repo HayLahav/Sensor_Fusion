@@ -69,6 +69,9 @@ class StageRunner:
         lidar_segmenter: "Optional[LidarSemanticSegmenter]" = None,
         yolo26_detector: object = None,
         fusion_iou_threshold: float = 0.25,
+        plan_audit: object = None,
+        map_underlay: object = None,
+        plan_hold_s: float = 2.0,
     ) -> None:
         self.detector = detector                      # WildDet3D / CenterPoint (3D geometry)
         self.tracker = tracker
@@ -87,6 +90,10 @@ class StageRunner:
         self.lidar_anchor = lidar_anchor              # LiDAR depth correction
         self.point_cloud_acc = point_cloud_acc        # rolling world point cloud
         self.lidar_segmenter = lidar_segmenter        # Utonia + linear probe
+        self.plan_audit = plan_audit                  # planning.audit.PlanningAudit
+        self.map_underlay = map_underlay              # mapping.lidar_map.LocalMapUnderlay
+        self.plan_hold_s = plan_hold_s
+        self._last_plan = None                        # (frame, world points, bad sets)
         # Accepted for compatibility with inference.py; 2D YOLO26 fusion is not
         # wired into this StageRunner yet.
         self.yolo26_detector = yolo26_detector
@@ -159,6 +166,7 @@ class StageRunner:
 
         # ── LiDAR semantics + per-object LiDAR position (motion gate input) ──
         lidar_labels: Optional[np.ndarray] = None
+        pts_cam_all: Optional[np.ndarray] = None
         if lidar_pts_velo is not None and hasattr(self.calib, "velo_to_cam_all"):
             from fusion_perception.utils.lidar_object import lidar_object_centroids
 
@@ -224,7 +232,9 @@ class StageRunner:
             kp_annotations=_kp_anns, instance_masks=_inst_masks,
             occupancy=occupancy,
         )
-        bev_img = render_bev(occupancy, tracks)
+        overlay = self._bev_overlay(frame_idx, tracks, occupancy, lidar_labels,
+                                    pts_cam_all if pts_cam_all is not None else lidar_pts)
+        bev_img = render_bev(occupancy, tracks, overlay=overlay)
         composite_img = composite(
             annotated_frame, bev_img, self._last_reasoning,
             depth_map=depth_map,
@@ -245,4 +255,75 @@ class StageRunner:
             "static_events": static_events,
             "depth_map": depth_map,
             "lidar_labels": lidar_labels,
+            "planning": self._last_planning_record,
         }
+
+    # ── BEV overlay: LiDAR map underlay, obstacles, driven / planned paths ────
+
+    _last_planning_record: Optional[dict] = None
+
+    def _bev_overlay(self, frame_idx, tracks, occupancy, lidar_labels, pts_cam):
+        self._last_planning_record = None
+        if self.plan_audit is None and self.map_underlay is None:
+            return None
+        from fusion_perception.visualization.bev_renderer import BEVOverlay
+
+        overlay = BEVOverlay(planner_label="Qwen-Drive")
+        if self.map_underlay is not None:
+            try:
+                overlay.map_points_xz = self.map_underlay.update(frame_idx, pts_cam)
+            except Exception as exc:
+                logger.debug(f"map underlay failed: {exc}")
+        if self.plan_audit is None:
+            return overlay
+
+        rec = self.plan_audit.update(
+            frame_idx,
+            {"tracks": tracks, "occupancy": occupancy, "lidar_labels": lidar_labels},
+            pts_cam,
+        )
+        self._last_planning_record = rec
+        ctx = self.plan_audit.last_context
+        if ctx is not None:
+            overlay.obstacle = ctx.obstacle
+        if rec is None:
+            return overlay
+        bad = lambda chk: {v["waypoint"] for v in chk["violations"]} if chk else set()
+        if rec.get("driven_path_check") is not None:
+            n = rec["driven_path_check"]["waypoints_checked"] + \
+                rec["driven_path_check"]["waypoints_outside_grid"]
+            overlay.driven_path = np.asarray(rec["driven_path"])[:n]
+            overlay.driven_bad = bad(rec["driven_path_check"])
+
+        # Planner paths: keep the latest plan in world coordinates and redraw it
+        # in the current ego frame for plan_hold_s seconds.
+        to_world = getattr(getattr(self.plan_audit.extractor, "ego_comp", None),
+                           "rectcam_to_world", None)
+        pl = rec.get("planner")
+        if pl and pl.get("trajectories") and to_world is not None:
+            T = to_world(frame_idx)
+            if T is not None:
+                worlds = [_ego_to_world(np.asarray(p), T) for p in pl["trajectories"]]
+                self._last_plan = (frame_idx, worlds, [bad(s["check"]) for s in pl["samples"]])
+        if self._last_plan is not None and to_world is not None:
+            f0, worlds, bads = self._last_plan
+            T = to_world(frame_idx)
+            if T is not None and (frame_idx - f0) <= self.plan_hold_s * self.fps:
+                shift = frame_idx - f0          # waypoints already behind us are dropped
+                overlay.planner_paths = [_world_to_ego(w, T)[shift:] for w in worlds]
+                overlay.planner_bad = [{i - shift for i in b if i >= shift} for b in bads]
+            elif T is not None:
+                self._last_plan = None
+        return overlay
+
+
+def _ego_to_world(path: np.ndarray, T_cam_to_world: np.ndarray) -> np.ndarray:
+    """Ego (x fwd, y left) path → world points at camera height."""
+    cam = np.stack([-path[:, 1], np.zeros(len(path)), path[:, 0]], 1)
+    return cam @ T_cam_to_world[:3, :3].T + T_cam_to_world[:3, 3]
+
+
+def _world_to_ego(world: np.ndarray, T_cam_to_world: np.ndarray) -> np.ndarray:
+    Tinv = np.linalg.inv(T_cam_to_world)
+    cam = world @ Tinv[:3, :3].T + Tinv[:3, 3]
+    return np.stack([cam[:, 2], -cam[:, 0], np.zeros(len(cam))], 1)

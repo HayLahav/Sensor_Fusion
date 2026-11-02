@@ -1,12 +1,22 @@
 """Render BEV occupancy/semantic grid as a top-down image with track annotations.
 
 Three per-track overlays (all drawn pre-flip in native grid resolution):
-  1. Footprint  — rotated rectangle (w × l at yaw ry) replacing the centroid dot
-  2. Velocity   — ego-compensated arrow, length ∝ speed (stationary tracks get none)
+  1. Footprint  — rotated rectangle (w × l at yaw ry) replacing the centroid dot;
+                  parked tracks (motion gate "static") are drawn grey and hollow
+  2. Velocity   — ego-compensated arrow, length ∝ speed (moving tracks only)
   3. Prediction — ghost dot + dashed line at pos + velocity × T_PRED seconds
+
+Optional BEVOverlay layers (render_bev(..., overlay=...)):
+  - LiDAR map underlay: accumulated world map around the car (faint grey)
+  - obstacles: ground-removed LiDAR + parked boxes used by the BEV check (white)
+  - driven path (green) and planner paths (cyan), waypoints flagged by the
+    BEV check in red
+  - a one-line legend under the image
 """
 from __future__ import annotations
 import math
+from dataclasses import dataclass, field
+from typing import Optional
 import cv2
 import numpy as np
 from fusion_perception.utils.dataclasses import OccupancyGrid, Track
@@ -60,6 +70,26 @@ def _sem_color(cls_id: int) -> tuple[int, int, int]:
 
 def _faded(color: tuple[int, int, int], factor: float = 0.45) -> tuple[int, int, int]:
     return tuple(max(0, int(c * factor)) for c in color)  # type: ignore[return-value]
+
+
+@dataclass
+class BEVOverlay:
+    """Extra layers for render_bev. Paths are in the ego frame (x forward,
+    y left, heading), as produced by fusion_perception.planning."""
+    map_points_xz: Optional[np.ndarray] = None          # [N,2] camera x, z
+    obstacle: Optional[np.ndarray] = None               # bool [rows, cols]
+    driven_path: Optional[np.ndarray] = None            # [N,3]
+    driven_bad: set = field(default_factory=set)        # waypoint indices
+    planner_paths: list = field(default_factory=list)   # [[N,3], ...]
+    planner_bad: list = field(default_factory=list)     # [set, ...] per path
+    planner_label: str = "plan"
+
+
+_C_DRIVEN = (80, 220, 80)
+_C_PLAN = (255, 220, 0)
+_C_BAD = (40, 40, 255)
+_C_OBST = (235, 235, 235)
+_C_MAP = (95, 95, 95)
 
 
 # ── Drawing helpers ───────────────────────────────────────────────────────────
@@ -134,11 +164,16 @@ def _draw_track(
     vx, _, vz = track.velocity_3d
     speed = math.hypot(vx, vz)
 
-    # Use motion_grid (BEV warp-and-diff) to determine if the object is truly
-    # moving independently of ego motion.  Fall back to KF speed threshold when
-    # the motion grid is not yet available (first frame or no pose data).
+    # Prefer the tracker's motion gate. Otherwise use motion_grid (BEV
+    # warp-and-diff), falling back to a KF speed threshold when the motion
+    # grid is not yet available (first frame or no pose data).
     motion_val = 0.0
-    if grid.motion_grid is not None:
+    state = getattr(track, "motion_state", "unknown")
+    if state == "static":
+        color = (150, 150, 150)
+    if state in ("static", "moving"):
+        moving = state == "moving"
+    elif grid.motion_grid is not None:
         cell_mg = world_to_grid(x, z, grid.x_range, grid.z_range, grid.resolution)
         if cell_mg is not None:
             try:
@@ -157,9 +192,10 @@ def _draw_track(
             grid.x_range, grid.z_range, res,
         )
         if corners is not None:
-            overlay = img.copy()
-            cv2.fillPoly(overlay, [corners], color)
-            cv2.addWeighted(overlay, 0.35, img, 0.65, 0, img)
+            if state != "static":            # parked: outline only
+                overlay = img.copy()
+                cv2.fillPoly(overlay, [corners], color)
+                cv2.addWeighted(overlay, 0.35, img, 0.65, 0, img)
             cv2.polylines(img, [corners], True, color, 1, cv2.LINE_AA)
     else:
         # Fallback: plain circle when no 3D box is available
@@ -192,11 +228,106 @@ def _draw_track(
 
 # ── Main render functions ─────────────────────────────────────────────────────
 
+def _ego_path_cells(path: np.ndarray, grid: OccupancyGrid) -> list[Optional[tuple[int, int]]]:
+    out = []
+    for x_e, y_e in np.asarray(path)[:, :2]:
+        out.append(world_to_grid(float(-y_e), float(x_e), grid.x_range, grid.z_range,
+                                 grid.resolution))
+    return out
+
+
+def _draw_path(img, path, grid, color, bad: set, thickness=1) -> None:
+    cells = _ego_path_cells(path, grid)
+    prev = (img.shape[1] // 2, _ego_row_unflipped(grid, img.shape[0]))   # start at the ego
+    for i, cell in enumerate(cells):
+        if cell is None:
+            prev = None
+            continue
+        p = (cell[1], cell[0])
+        if prev is not None:
+            cv2.line(img, prev, p, _C_BAD if i in bad else color, thickness, cv2.LINE_AA)
+        prev = p
+
+
+def _ego_row_unflipped(grid: OccupancyGrid, n_rows: int) -> int:
+    return min(n_rows - 1, max(0, int(-grid.z_range[0] / grid.resolution)))
+
+
+def _apply_underlays(img: np.ndarray, grid: OccupancyGrid,
+                     overlay: Optional[BEVOverlay], background_mask: np.ndarray) -> None:
+    """LiDAR map dots on cells with no semantic class, then obstacle tint."""
+    if overlay is None:
+        return
+    n_rows, n_cols = img.shape[:2]
+    if overlay.map_points_xz is not None and len(overlay.map_points_xz):
+        xz = np.asarray(overlay.map_points_xz)
+        c = ((xz[:, 0] - grid.x_range[0]) / grid.resolution).astype(np.intp)
+        r = ((xz[:, 1] - grid.z_range[0]) / grid.resolution).astype(np.intp)
+        ok = (r >= 0) & (r < n_rows) & (c >= 0) & (c < n_cols)
+        r, c = r[ok], c[ok]
+        bg = background_mask[r, c]
+        img[r[bg], c[bg]] = _C_MAP
+    if overlay.obstacle is not None and overlay.obstacle.shape == (n_rows, n_cols):
+        tint = img.copy()
+        tint[overlay.obstacle] = _C_OBST
+        cv2.addWeighted(tint, 0.6, img, 0.4, 0, img)
+
+
+def _apply_paths(img: np.ndarray, grid: OccupancyGrid, overlay: Optional[BEVOverlay]) -> None:
+    if overlay is None:
+        return
+    if overlay.driven_path is not None and len(overlay.driven_path):
+        _draw_path(img, overlay.driven_path, grid, _C_DRIVEN, overlay.driven_bad)
+    for i, path in enumerate(overlay.planner_paths):
+        bad = overlay.planner_bad[i] if i < len(overlay.planner_bad) else set()
+        _draw_path(img, path, grid, _C_PLAN, bad)
+
+
+def _legend(img: np.ndarray, overlay: Optional[BEVOverlay]) -> np.ndarray:
+    if overlay is None:
+        return img
+    items = []
+    if overlay.driven_path is not None:
+        items.append(("driven", _C_DRIVEN))
+    if overlay.planner_paths:
+        items.append((overlay.planner_label, _C_PLAN))
+    if overlay.driven_bad or any(overlay.planner_bad):
+        items.append(("flagged", _C_BAD))
+    if overlay.obstacle is not None:
+        items.append(("obstacle", _C_OBST))
+    items.append(("parked", (150, 150, 150)))
+    bar = np.zeros((18, img.shape[1], 3), np.uint8)
+    x = 4
+    for text, col in items:
+        cv2.rectangle(bar, (x, 5), (x + 8, 13), col, -1)
+        cv2.putText(bar, text, (x + 11, 13), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (230, 230, 230), 1,
+                    cv2.LINE_AA)
+        x += 16 + 7 * len(text)
+    return np.vstack([img, bar])
+
+
+def _finish(bev_img: np.ndarray, grid: OccupancyGrid, size_px: int,
+            overlay: Optional[BEVOverlay]) -> np.ndarray:
+    n_rows, n_cols = bev_img.shape[:2]
+    bev_img = cv2.flip(bev_img, 0)
+    ego_col = n_cols // 2
+    ego_row = n_rows - 1 - _ego_row_unflipped(grid, n_rows)
+    cv2.circle(bev_img, (ego_col, ego_row), 5, (0, 255, 0), -1)
+    cv2.circle(bev_img, (ego_col, ego_row), 5, (0, 0, 0), 1)
+    out = cv2.resize(bev_img, (size_px, size_px), interpolation=cv2.INTER_NEAREST)
+    if overlay is None:
+        return out
+    # Keep the square size the compositor expects: drop the farthest rows for the legend
+    with_legend = _legend(out, overlay)
+    return with_legend[-size_px:] if with_legend.shape[0] > size_px else with_legend
+
+
 def _render_semantic(
     sem_grid: np.ndarray,
     tracks: list[Track],
     grid: OccupancyGrid,
     size_px: int,
+    overlay: Optional[BEVOverlay] = None,
 ) -> np.ndarray:
     n_rows, n_cols = sem_grid.shape
     bev_img = np.full((n_rows, n_cols, 3), _SEM_BGR[-1], dtype=np.uint8)
@@ -205,25 +336,18 @@ def _render_semantic(
     for cls_id in unique_cls:
         bev_img[sem_grid == cls_id] = _sem_color(cls_id)
 
+    _apply_underlays(bev_img, grid, overlay, background_mask=(sem_grid < 0))
     for track in tracks:
         _draw_track(bev_img, track, grid)
-
-    bev_img = cv2.flip(bev_img, 0)
-
-    # Ego vehicle marker
-    ego_col = n_cols // 2
-    z_span  = grid.z_range[1] - grid.z_range[0]
-    ego_row = max(0, n_rows - 1 - int(abs(grid.z_range[0]) / z_span * n_rows))
-    cv2.circle(bev_img, (ego_col, ego_row), 5, (0, 255, 0), -1)
-    cv2.circle(bev_img, (ego_col, ego_row), 5, (0, 0, 0),   1)
-
-    return cv2.resize(bev_img, (size_px, size_px), interpolation=cv2.INTER_NEAREST)
+    _apply_paths(bev_img, grid, overlay)
+    return _finish(bev_img, grid, size_px, overlay)
 
 
 def render_bev(
     grid: OccupancyGrid,
     tracks: list[Track],
     size_px: int = 400,
+    overlay: Optional[BEVOverlay] = None,
 ) -> np.ndarray:
     """Render BEV as [size_px, size_px, 3] BGR image."""
     rows = len(grid.grid)
@@ -231,7 +355,7 @@ def render_bev(
 
     if grid.sem_grid is not None:
         return _render_semantic(
-            np.array(grid.sem_grid, dtype=np.int16), tracks, grid, size_px
+            np.array(grid.sem_grid, dtype=np.int16), tracks, grid, size_px, overlay
         )
 
     # ── Legacy occupancy fallback ─────────────────────────────────────────────
@@ -245,10 +369,8 @@ def render_bev(
     bev_img[:, :, 2] = np.where(hi, (occupancy * 255).astype(np.uint8), 0)
     bev_img[:, :, 1] = np.where(hi, (occupancy * 80).astype(np.uint8), bev_img[:, :, 1])
 
+    _apply_underlays(bev_img, grid, overlay, background_mask=(occupancy < 0.3))
     for track in tracks:
         _draw_track(bev_img, track, grid)
-
-    bev_img = cv2.flip(bev_img, 0)
-    cv2.circle(bev_img, (cols // 2, rows - 2), 4, (0, 255, 0), -1)
-
-    return cv2.resize(bev_img, (size_px, size_px), interpolation=cv2.INTER_NEAREST)
+    _apply_paths(bev_img, grid, overlay)
+    return _finish(bev_img, grid, size_px, overlay)

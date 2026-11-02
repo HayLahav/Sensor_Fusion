@@ -27,7 +27,7 @@ Each frame is a 4-panel composite: **camera view** (3D boxes + track IDs) · **B
 
 ![top-down LiDAR map](docs/assets/map_topdown.png)
 
-> Accumulated LiDAR point cloud projected to the world frame via KITTI-360 pose transforms, rendered as a bird's-eye-view map.
+> Accumulated LiDAR point cloud projected to the world frame via KITTI-360 pose transforms, rendered as a bird's-eye-view map. *This image predates the calibration fix (see Known Issues); rebuild it with `scripts/build_lidar_map.py`.*
 
 ---
 
@@ -261,6 +261,7 @@ fusion_perception/
 ├── data/           # KITTI-360 / KITTI raw loaders, calibration, GT labels
 ├── depth/          # DA-V2 monocular depth, LiDAR anchor, quality gate
 ├── evaluation/     # metrics (mAP, MOTA, MOTP), benchmark runner
+├── mapping/        # LiDAR world map, BEV map underlay, GPS georeferencing
 ├── memory/         # Gemma rolling scene-memory buffer
 ├── models/         # WildDet3D, YOLO26, Gemma, frustum detector wrappers
 ├── occupancy/      # BEV grid with LiDAR fusion and exponential decay
@@ -323,6 +324,33 @@ run.py              # lightweight single-pass CLI entry-point
 The existing occupancy grid marks every LiDAR return, road surface included, so the check builds its own obstacle layer with the ground removed (by Utonia labels, or by height above the lowest return within 2 m).
 
 Run it on a drive with `planning.enabled: true` in the config. At the end it prints how often the driven path was flagged, per check type, and writes `planning.json` (per-frame ego state, command and check result). A low false-alarm rate is what makes the check worth trusting on Qwen-Drive's paths; if one type is high, tune `planning.bev_check` first.
+
+## BEV panel and LiDAR world map
+
+**BEV panel** (`visualization/bev_renderer.py`). On KITTI-360 with LiDAR, the BEV in the output video adds:
+- the LiDAR map accumulated around the car (grey), under the live grid (`visualization.map_underlay`);
+- parked tracks (motion gate `static`) drawn grey and hollow, with no velocity arrow;
+- with `planning.enabled`: the obstacle layer the BEV check uses (white), the driven path (green), Qwen-Drive's plan (cyan, kept on screen for 2 s and moved with the car), and waypoints the check flags (red), plus a legend.
+
+**LiDAR world map on a real map** (`scripts/build_lidar_map.py`, `fusion_perception/mapping/`). Builds the map with the correct Velodyne → IMU → world chain (the notebook now calls it too), then, if KITTI-360's GPS log is present (`data_poses/<seq>/oxts/data`), fits the pose frame to GPS and writes:
+
+| File | What it is |
+|------|------------|
+| `lidar_map.ply` | world-frame point cloud, coloured by height |
+| `map_topdown.png` | top-down render in the KITTI-360 world frame |
+| `georef.json` | world → latitude/longitude transform, with the GPS fit error |
+| `map_north_up.png` | north-up render, transparent background |
+| `paths.geojson` | driven route, plus Qwen-Drive plans from `planning.json` (cyan = ok, red = flagged) |
+| `map_view.html` | OpenStreetMap with the LiDAR map and paths on top |
+
+```bash
+python scripts/build_lidar_map.py --kitti360-root /data/KITTI-360 \
+    --seq 2013_05_28_drive_0000_sync --start 0 --end 1000 \
+    --planning outputs/<run>/planning.json --out outputs/<run>/map
+cd outputs/<run>/map && python -m http.server   # then open map_view.html
+```
+
+Positioning comes from KITTI-360's own poses (centimetre-level) tied to GPS with one rigid fit over the whole drive, so expect the map to sit on the street map to within the GPS error (decimetres to about a metre, reported in `georef.json`). A visual positioning service (VPS) would not improve on that for KITTI-360.
 
 ## Qwen-Drive planner (optional)
 

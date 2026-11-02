@@ -87,10 +87,12 @@ class PlanningAudit:
         self.every = max(1, every)
         self.plan_source = plan_source
         self.records: list[dict] = []
+        self.last_context = None      # BEVPlanContext of the last checked frame (for drawing)
 
     def update(self, frame_idx: int, outputs: dict,
                lidar_pts_cam_all: Optional[np.ndarray]) -> Optional[dict]:
         plan = None
+        self.last_context = None
         try:
             state = self.extractor.get(frame_idx)
             if state is None:
@@ -123,6 +125,7 @@ class PlanningAudit:
                 cfg=self.cfg,
                 **self.default_grid,
             )
+            self.last_context = ctx
             dt = 1.0 / self.extractor.fps
             if has_driven:
                 rec["driven_path_check"] = check_trajectory(driven, ctx, dt=dt, cfg=self.cfg).to_dict()

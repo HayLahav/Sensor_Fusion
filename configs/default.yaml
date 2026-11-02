@@ -145,3 +145,12 @@ planning:
     side_mode: "fisheye"          # fisheye | front_crop | blank (see planning/kitti360_views.py)
     side_yaw_deg: 55.0
     side_hfov_deg: 75.0
+
+# BEV panel extras. With KITTI-360 poses + LiDAR, the BEV shows the LiDAR map
+# accumulated around the car (grey) under the live grid. With planning
+# enabled it also shows the obstacle layer, the driven path (green), Qwen-Drive
+# plans (cyan) and BEV-check flags (red). Parked tracks are drawn grey/hollow.
+visualization:
+  map_underlay: true
+  map_voxel: 0.25      # m
+  map_radius: 70.0     # m kept around the car

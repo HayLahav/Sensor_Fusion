@@ -470,6 +470,18 @@ def main() -> int:
                                        plan_source=plan_source)
             print("[inference] Planning audit on (ego state + BEV check of driven path"
                   + (" and Qwen-Drive plans)" if plan_source is not None else ")"))
+            runner.plan_audit = plan_audit      # runs per frame and feeds the BEV overlay
+
+    # ── BEV LiDAR map underlay (accumulated map around the car) ─────────────
+    vis_cfg = cfg.get("visualization", None) or {}
+    if vis_cfg.get("map_underlay", True) and ego_comp is not None and lidar_seq is not None:
+        from fusion_perception.mapping.lidar_map import LocalMapUnderlay
+        runner.map_underlay = LocalMapUnderlay(
+            ego_comp.rectcam_to_world,
+            voxel=float(vis_cfg.get("map_voxel", 0.25)),
+            radius=float(vis_cfg.get("map_radius", 70.0)),
+        )
+        print("[inference] BEV LiDAR map underlay on")
 
     # ── Pass 1: Detection + tracking ─────────────────────────────────────────
     print(f"\n[Pass 1] detection + tracking ({_total} total frames)...")
@@ -496,12 +508,6 @@ def main() -> int:
                                        lidar_pts=lidar_pts, lidar_pts_velo=lidar_velo,
                                        T_ego=T_ego)
             all_detections[frame_idx] = outputs["detections"]
-            if plan_audit is not None:
-                plan_audit.update(
-                    frame_idx, outputs,
-                    calib.velo_to_cam_all(lidar_velo)
-                    if (lidar_velo is not None and hasattr(calib, "velo_to_cam_all")) else None,
-                )
             for t in outputs["tracks"]:
                 all_tracks[t.track_id] = t
 
