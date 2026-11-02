@@ -300,6 +300,14 @@ run.py              # lightweight single-pass CLI entry-point
   - `PoseEgoCompensation` now interpolates frames missing from `poses.txt` (KITTI-360 leaves out frames, e.g. while the car is stopped). Before, each gap dropped compensation for that frame *and* the next one, so static objects jumped by the ego displacement.
   - A motion gate in the tracker keeps each track's measured positions, warps them with the same ego transform as the Kalman state, and fits their ground-plane speed. Velocity stays at zero while the track is `unknown` or `static`, so a noisy first box no longer becomes a velocity. Positions come from the object's own LiDAR points (`utils/lidar_object.py`, ≥5 frames) or from box centres when there is no LiDAR (≥10 frames). Tune with `tracking.motion_gate_*` in `configs/default.yaml`.
 
+- **Planned: add the Qwen-Drive planner, checked against the BEV grid.**
+  [Qwen-Drive-1.0](https://github.com/QwenLM/Qwen-Drive-1.0) (Apache-2.0) predicts a 5 s ego path (50 points of x, y, heading) from three cameras and ego state. The pipeline has no planner today, so this would be a new stage after the BEV grid. Following the BEV-Forcing result below (see *Related work*), the BEV grid is the shared interface between perception and the planner, not the camera images:
+  - **Camera mismatch.** Qwen-Drive was trained on front, front-left and front-right cameras; KITTI-360 has a forward stereo pair and two side fisheyes. Expect a quality drop. Feed the front camera (plus undistorted side views if tried) and treat the plan as a proposal.
+  - **Ego state** (speed, acceleration, turn command) comes from `poses.txt` via `PoseEgoCompensation`. The turn command is derived from the future heading change.
+  - **BEV check.** Rasterise the planned path into the BEV grid and flag plans that cross occupied cells, non-road cells (camera or Utonia LiDAR semantics), or the predicted paths of moving tracks. Only the motion gate's `moving` tracks are extrapolated, so parked cars are obstacles, not traffic.
+  - **Evaluation.** Open-loop error against the real future ego path from `poses.txt` (average and final displacement at 1/2/3 s), plus the rate of BEV-check violations.
+  - **Hardware.** About 11 GB of weights in bf16 and a 24 GB GPU recommended; a T4 likely needs 4-bit loading and no FlashAttention. Run it every N frames, like Gemma.
+
 ## Utonia LiDAR semantics (optional)
 
 [Utonia](https://github.com/Pointcept/Utonia) is a pretrained point-cloud encoder (PTv3). It returns one feature vector per LiDAR point, and a linear layer trained on KITTI-360's 3D semantic labels turns those into 13 classes (`segmentation/lidar_classes.py`). In the pipeline the classes pick each detection's own LiDAR points (car points, not road or walls behind it), which makes the motion gate's position input steadier.
@@ -318,6 +326,12 @@ python scripts/train_utonia_probe.py \
 Needs `data_3d_semantics/train/<seq>/` and `data_3d_raw/<seq>/` from KITTI-360. KITTI-360 doesn't label single scans, so labels are copied from its accumulated semantic clouds by nearest neighbour. The script reports validation mIoU and a **scan-to-map distance** per sequence: how far each scan lands from KITTI-360's map after the LiDAR→IMU→world transform. That number checks your calibration and poses: a wrong extrinsic shows up as a large median distance. Then set `lidar_semantics.enabled: true`.
 
 Notes: Utonia's weights are CC-BY-NC 4.0 (non-commercial). On a T4 keep `enable_flash: false`. `--scale` sets the voxel size (0.01/scale m) and may need tuning for outdoor LiDAR.
+
+## Related work
+
+- **BEV as the interface between perception and driving.** Azevedo, Sabatini, Hornauer and Moutarde, *Towards Zero-Shot Transfer Across Embodiments For Driving VLAs* ([arXiv:2609.02341](https://arxiv.org/abs/2609.02341)). Driving vision-language-action models are usually trained on one dataset and camera rig and transfer poorly to new ones. The paper adds *BEV-Forcing*, an auxiliary bird's-eye-view objective, arguing that BEV is a more consistent, rig-independent representation for driving than image-plane depth. It improves zero-shot transfer to unseen datasets and camera rigs, though the gain shrinks as more training datasets are mixed (WOD-E2E, NAVSIM, nuScenes). This pipeline makes the same choice by fusing camera, LiDAR and tracks into one BEV grid before reasoning, and the planned Qwen-Drive stage uses that grid to check plans made from KITTI-360's non-standard camera rig.
+- **Utonia** — one pretrained encoder for many kinds of point clouds ([arXiv:2603.03283](https://arxiv.org/abs/2603.03283), [code](https://github.com/Pointcept/Utonia)); used for LiDAR semantics.
+- **Qwen-Drive-1.0** — vision-language driving model with a planning expert ([code](https://github.com/QwenLM/Qwen-Drive-1.0)); candidate planner.
 
 ---
 
