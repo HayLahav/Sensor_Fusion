@@ -264,6 +264,7 @@ fusion_perception/
 ├── memory/         # Gemma rolling scene-memory buffer
 ├── models/         # WildDet3D, YOLO26, Gemma, frustum detector wrappers
 ├── occupancy/      # BEV grid with LiDAR fusion and exponential decay
+├── planning/       # ego state from poses, BEV check for planned paths
 ├── pipelines/      # StageRunner (per-frame orchestration)
 ├── reasoning/      # prompt builder, Jinja2 templates
 ├── segmentation/   # YOLO26n-sem road segmentor
@@ -300,13 +301,28 @@ run.py              # lightweight single-pass CLI entry-point
   - `PoseEgoCompensation` now interpolates frames missing from `poses.txt` (KITTI-360 leaves out frames, e.g. while the car is stopped). Before, each gap dropped compensation for that frame *and* the next one, so static objects jumped by the ego displacement.
   - A motion gate in the tracker keeps each track's measured positions, warps them with the same ego transform as the Kalman state, and fits their ground-plane speed. Velocity stays at zero while the track is `unknown` or `static`, so a noisy first box no longer becomes a velocity. Positions come from the object's own LiDAR points (`utils/lidar_object.py`, ≥5 frames) or from box centres when there is no LiDAR (≥10 frames). Tune with `tracking.motion_gate_*` in `configs/default.yaml`.
 
-- **Planned: add the Qwen-Drive planner, checked against the BEV grid.**
+- **In progress: add the Qwen-Drive planner, checked against the BEV grid.** Ego state and BEV check are built (see *Planning support* below); the Qwen-Drive wrapper is next.
   [Qwen-Drive-1.0](https://github.com/QwenLM/Qwen-Drive-1.0) (Apache-2.0) predicts a 5 s ego path (50 points of x, y, heading) from three cameras and ego state. The pipeline has no planner today, so this would be a new stage after the BEV grid. Following the BEV-Forcing result below (see *Related work*), the BEV grid is the shared interface between perception and the planner, not the camera images:
   - **Camera mismatch.** Qwen-Drive was trained on front, front-left and front-right cameras; KITTI-360 has a forward stereo pair and two side fisheyes. Expect a quality drop. Feed the front camera (plus undistorted side views if tried) and treat the plan as a proposal.
   - **Ego state** (speed, acceleration, turn command) comes from `poses.txt` via `PoseEgoCompensation`. The turn command is derived from the future heading change.
   - **BEV check.** Rasterise the planned path into the BEV grid and flag plans that cross occupied cells, non-road cells (camera or Utonia LiDAR semantics), or the predicted paths of moving tracks. Only the motion gate's `moving` tracks are extrapolated, so parked cars are obstacles, not traffic.
   - **Evaluation.** Open-loop error against the real future ego path from `poses.txt` (average and final displacement at 1/2/3 s), plus the rate of BEV-check violations.
   - **Hardware.** About 11 GB of weights in bf16 and a 24 GB GPU recommended; a T4 likely needs 4-bit loading and no FlashAttention. Run it every N frames, like Gemma.
+
+## Planning support (no planner model yet)
+
+`fusion_perception/planning/` holds what a planner needs from this pipeline, built and tested before the planner itself:
+
+| File | What it does |
+|------|--------------|
+| `ego_state.py` | From KITTI-360 poses: speed and acceleration, 1.5 s past path, 5 s future path actually driven, and a left / straight / right turn command from the heading change over the next 30 m. `EgoState.to_qwen_drive()` gives the ego fields in Qwen-Drive's layout (x forward, y left, heading positive left). |
+| `bev_check.py` | Checks a planned path on the BEV grid: **obstacle** (LiDAR returns above the ground, plus boxes of tracks not moving), **off_road** (camera or Utonia LiDAR semantics), **agent** (too close to a moving track's constant-velocity forecast). The ego car is three discs along its heading. |
+| `metrics.py` | ADE / FDE at 1, 2, 3 s against the driven path. |
+| `audit.py` | Runs the BEV check on the path the car actually drove. That path is safe, so every flag is a false alarm. |
+
+The existing occupancy grid marks every LiDAR return, road surface included, so the check builds its own obstacle layer with the ground removed (by Utonia labels, or by height above the lowest return within 2 m).
+
+Run it on a drive with `planning.enabled: true` in the config. At the end it prints how often the driven path was flagged, per check type, and writes `planning.json` (per-frame ego state, command and check result). A low false-alarm rate is what makes the check worth trusting on Qwen-Drive's paths; if one type is high, tune `planning.bev_check` first.
 
 ## Utonia LiDAR semantics (optional)
 

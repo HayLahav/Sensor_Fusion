@@ -413,6 +413,27 @@ def main() -> int:
             (comp_w, _h),
         )
 
+    # ── Planning audit: ego state + BEV check of the driven path (optional) ──
+    plan_audit = None
+    pl_cfg = cfg.get("planning", None)
+    if pl_cfg is not None and pl_cfg.get("enabled", False):
+        if ego_comp is None:
+            print("[inference] WARNING: planning audit needs KITTI-360 poses — skipped")
+        else:
+            from fusion_perception.planning.audit import DrivenPathAudit
+            from fusion_perception.planning.bev_check import BEVCheckConfig
+            from fusion_perception.planning.ego_state import EgoStateExtractor
+            extractor = EgoStateExtractor(
+                ego_comp, fps=float(_fps_src or 10.0),
+                turn_threshold_deg=float(pl_cfg.get("turn_threshold_deg", 20.0)),
+            )
+            chk = dict(pl_cfg.get("bev_check", {}) or {})
+            if "ego_disc_offsets" in chk:
+                chk["ego_disc_offsets"] = tuple(chk["ego_disc_offsets"])
+            plan_audit = DrivenPathAudit(extractor, BEVCheckConfig(**chk),
+                                         every=int(pl_cfg.get("every", 1)))
+            print("[inference] Planning audit on (ego state + BEV check of driven path)")
+
     # ── Pass 1: Detection + tracking ─────────────────────────────────────────
     print(f"\n[Pass 1] detection + tracking ({_total} total frames)...")
     all_detections: dict = {}
@@ -438,6 +459,12 @@ def main() -> int:
                                        lidar_pts=lidar_pts, lidar_pts_velo=lidar_velo,
                                        T_ego=T_ego)
             all_detections[frame_idx] = outputs["detections"]
+            if plan_audit is not None:
+                plan_audit.update(
+                    frame_idx, outputs,
+                    calib.velo_to_cam_all(lidar_velo)
+                    if (lidar_velo is not None and hasattr(calib, "velo_to_cam_all")) else None,
+                )
             for t in outputs["tracks"]:
                 all_tracks[t.track_id] = t
 
@@ -477,6 +504,12 @@ def main() -> int:
     save_tracks(out_dir / "tracks.json", run_id, all_tracks)
     print(f"[Pass 1] done — {last_frame_idx + 1} frames, "
           f"{len(all_tracks)} tracks, {n_errors} errors")
+    if plan_audit is not None:
+        summ = plan_audit.save(out_dir / "planning.json")
+        rates = ", ".join(f"{k} {100 * v:.1f}%" for k, v in summ["false_alarm_rate_by_kind"].items())
+        print(f"[Planning] driven path flagged on {100 * summ['false_alarm_rate']:.1f}% of "
+              f"{summ['frames_checked']} frames ({rates or 'none'}); "
+              f"commands {summ['commands']} → {out_dir / 'planning.json'}")
 
     # ── Free GPU ──────────────────────────────────────────────────────────────
     detector.unload()
