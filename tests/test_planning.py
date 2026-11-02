@@ -97,8 +97,21 @@ def test_ego_state_left_turn_is_positive_y_and_heading():
 def test_ego_state_unknown_at_end_and_none_without_history():
     ex = _extractor(_straight_poses(n=60))
     assert ex.get(5) is None                   # less than 1.5 s of past
-    s = ex.get(58)
+    s = ex.get(59)                             # last frame: nothing ahead
     assert s.future is None and s.command == "unknown"
+    s = ex.get(57)                             # two real future poses, rest padded
+    assert sum(s.future_valid) == 2 and len(s.future) == 50
+    assert len(s.valid_future()) == 2
+
+
+def test_history_dynamics_in_body_frame():
+    s = _extractor(_left_turn_poses()).get(30)
+    hv = np.asarray(s.history_velocity)
+    assert hv.shape == (16, 2) and np.asarray(s.history_acceleration).shape == (16, 2)
+    # Constant-speed circle: in each point's own frame the car moves straight ahead
+    assert np.allclose(hv[:, 0], 8.0, rtol=0.02) and np.allclose(hv[:, 1], 0.0, atol=0.1)
+    # Centripetal acceleration v²/r = 3.2 m/s² to the left
+    assert np.asarray(s.history_acceleration)[-1, 1] == pytest.approx(3.2, rel=0.05)
 
 
 def test_ego_state_fills_missing_pose_frames():

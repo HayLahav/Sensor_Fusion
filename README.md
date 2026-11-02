@@ -264,7 +264,7 @@ fusion_perception/
 ├── memory/         # Gemma rolling scene-memory buffer
 ├── models/         # WildDet3D, YOLO26, Gemma, frustum detector wrappers
 ├── occupancy/      # BEV grid with LiDAR fusion and exponential decay
-├── planning/       # ego state from poses, BEV check for planned paths
+├── planning/       # ego state, BEV check, KITTI-360 views, Qwen-Drive scenes + audit
 ├── pipelines/      # StageRunner (per-frame orchestration)
 ├── reasoning/      # prompt builder, Jinja2 templates
 ├── segmentation/   # YOLO26n-sem road segmentor
@@ -297,11 +297,11 @@ run.py              # lightweight single-pass CLI entry-point
   The current config uses `yolo26n` (nano) as the 2D detector. Upgrading to `yolo26s` or `yolo26m` should improve recall on small or partially-occluded vehicles at the cost of extra VRAM and inference time. Worth benchmarking against the existing mAP numbers on the KITTI-360 drive.
 
 - **Ego-motion false motion on suddenly appearing parked cars — fix in place, needs a KITTI-360 run to confirm.**
-  Two changes:
+  Likely root cause: `calib_cam_to_pose.txt` puts each camera's 12 values on the same line as its name (`image_00: …`), but the parser only read the following lines, so it fell back to an **identity** camera→IMU transform (logging "image_00 not found … using identity"). Ego motion was then applied in the wrong axes: forward driving (IMU x) became sideways motion in the camera frame. The parser now reads both layouts and raises an error instead of using identity. Two further changes:
   - `PoseEgoCompensation` now interpolates frames missing from `poses.txt` (KITTI-360 leaves out frames, e.g. while the car is stopped). Before, each gap dropped compensation for that frame *and* the next one, so static objects jumped by the ego displacement.
   - A motion gate in the tracker keeps each track's measured positions, warps them with the same ego transform as the Kalman state, and fits their ground-plane speed. Velocity stays at zero while the track is `unknown` or `static`, so a noisy first box no longer becomes a velocity. Positions come from the object's own LiDAR points (`utils/lidar_object.py`, ≥5 frames) or from box centres when there is no LiDAR (≥10 frames). Tune with `tracking.motion_gate_*` in `configs/default.yaml`.
 
-- **In progress: add the Qwen-Drive planner, checked against the BEV grid.** Ego state and BEV check are built (see *Planning support* below); the Qwen-Drive wrapper is next.
+- **Qwen-Drive planner, checked against the BEV grid — built, needs a GPU run.** See *Qwen-Drive planner* below.
   [Qwen-Drive-1.0](https://github.com/QwenLM/Qwen-Drive-1.0) (Apache-2.0) predicts a 5 s ego path (50 points of x, y, heading) from three cameras and ego state. The pipeline has no planner today, so this would be a new stage after the BEV grid. Following the BEV-Forcing result below (see *Related work*), the BEV grid is the shared interface between perception and the planner, not the camera images:
   - **Camera mismatch.** Qwen-Drive was trained on front, front-left and front-right cameras; KITTI-360 has a forward stereo pair and two side fisheyes. Expect a quality drop. Feed the front camera (plus undistorted side views if tried) and treat the plan as a proposal.
   - **Ego state** (speed, acceleration, turn command) comes from `poses.txt` via `PoseEgoCompensation`. The turn command is derived from the future heading change.
@@ -323,6 +323,35 @@ run.py              # lightweight single-pass CLI entry-point
 The existing occupancy grid marks every LiDAR return, road surface included, so the check builds its own obstacle layer with the ground removed (by Utonia labels, or by height above the lowest return within 2 m).
 
 Run it on a drive with `planning.enabled: true` in the config. At the end it prints how often the driven path was flagged, per check type, and writes `planning.json` (per-frame ego state, command and check result). A low false-alarm rate is what makes the check worth trusting on Qwen-Drive's paths; if one type is high, tune `planning.bev_check` first.
+
+## Qwen-Drive planner (optional)
+
+[Qwen-Drive-1.0](https://github.com/QwenLM/Qwen-Drive-1.0) plans a 5 s path from three forward cameras plus the ego state. KITTI-360's cameras differ, so `planning/kitti360_views.py` builds the three views: the front camera (`image_00`), and front-left / front-right views rendered as virtual pinhole cameras out of the side fisheyes (`image_02` / `image_03`, MEI model), turned 55° from straight ahead. `side_mode: front_crop` or `blank` are fallbacks when fisheye data isn't downloaded.
+
+Qwen-Drive pins torch 2.8 / transformers 5.x while this project pins torch 2.5.1, so the default route uses two environments:
+
+```bash
+# 1. this environment: write Qwen-Drive scene files + camera views
+python scripts/export_qwen_drive_scenes.py --kitti360-root /data/KITTI-360 \
+    --seq 2013_05_28_drive_0000_sync --start 0 --end 1000 --stride 10 \
+    --out outputs/qwen_drive/drive_0000
+```
+
+```bash
+# 2. Qwen-Drive environment (its repo, weights from Hugging Face Qwen/Qwen-Drive-1.0-4B)
+PYTHONPATH=src python scripts/run_planning.py --model Qwen-Drive-1.0-4B \
+    --planner Qwen-Drive-1.0-4B/planner-rl \
+    --scenes /abs/outputs/qwen_drive/drive_0000/scenes.jsonl \
+    --image-root /abs/outputs/qwen_drive/drive_0000 \
+    --output /abs/outputs/qwen_drive/drive_0000/predictions.jsonl \
+    --mode reasoning_planning --attn-implementation sdpa
+```
+
+3. Back here, set `planning.enabled: true` and `planning.qwen_drive.predictions: outputs/qwen_drive/drive_0000/predictions.jsonl`, and run `inference.py` on the same drive. Each planned path gets the BEV check and ADE/FDE against the path actually driven. Both summaries print at the end and go to `planning.json`. A planner flag only means something compared with the driven path's false-alarm rate.
+
+If `qwen_drive` installs alongside this project, `planning.qwen_drive.live: true` runs it in-process (`models/qwen_drive_wrapper.py`) every `every` frames instead; it needs ~11 GB of extra GPU memory next to the perception models. On a T4 use fp16 (`dtype: auto` picks it) and `sdpa` attention.
+
+Scene records were checked against Qwen-Drive's own scene reader. The ego frame origin here is the camera, not Qwen-Drive's vehicle reference point, so expect a small constant offset.
 
 ## Utonia LiDAR semantics (optional)
 

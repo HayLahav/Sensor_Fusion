@@ -2,9 +2,12 @@
 
 For each frame this gives, in the current ego frame (x forward, y left):
   - speed and acceleration (vx, vy, ax, ay) from finite differences
-  - past path: 16 points over 1.5 s at 10 Hz, plus the current pose
+  - past path: 16 points over 1.5 s at 10 Hz, the last one being the current
+    pose (0, 0, 0), with velocity and acceleration at each point expressed
+    in that point's own body frame (Qwen-Drive's convention, docs/data.md)
   - future path actually driven: 50 points over 5 s (ground truth, used for
-    evaluation and for the turn command)
+    evaluation and for the turn command), with a validity mask near the end
+    of a drive
   - turn command (left / straight / right / unknown), derived from the
     heading change along the future path, the way benchmarks like NAVSIM
     derive it from the route
@@ -33,7 +36,25 @@ class EgoState:
     future: Optional[list[list[float]]]   # [[x, y, heading], ...] t = dt … horizon, None if unavailable
     command: str                          # left | straight | right | unknown
     command_heading_change: Optional[float] = None   # rad, what the command was derived from
+    history_velocity: list[list[float]] = field(default_factory=list)      # [16, 2] body frame
+    history_acceleration: list[list[float]] = field(default_factory=list)  # [16, 2] body frame
+    future_valid: Optional[list[int]] = None   # [50] 1 where the future pose is real
     extra: dict = field(default_factory=dict)
+
+    @property
+    def nav_command(self) -> int:
+        """Qwen-Drive scalar command: 0 straight, 1 left, 2 right (unknown → straight)."""
+        return {STRAIGHT: 0, LEFT: 1, RIGHT: 2}.get(self.command, 0)
+
+    def valid_future(self) -> Optional[np.ndarray]:
+        """Future path cut at the first invalid point (end of the drive)."""
+        if self.future is None:
+            return None
+        fut = np.asarray(self.future)
+        if self.future_valid is None:
+            return fut
+        bad = np.flatnonzero(np.asarray(self.future_valid) == 0)
+        return fut[: bad[0]] if len(bad) else fut
 
     def command_one_hot(self) -> list[float]:
         """[left, straight, right, unknown] one-hot."""
@@ -45,15 +66,16 @@ class EgoState:
         Check the field names against the Qwen-Drive version you install
         before wiring this into its scene files.
         """
-        nav = {STRAIGHT: 0, LEFT: 1, RIGHT: 2}.get(self.command, 0)
         return {
             "ego_status": {
                 "ego_velocity": list(self.velocity),
                 "ego_acceleration": list(self.acceleration),
                 "driving_command": self.command_one_hot(),
             },
-            "nav_command": nav,
-            "history_trajectory": [list(p) for p in self.history],
+            "nav_command": self.nav_command,
+            "hist_traj_10hz": [list(p) for p in self.history],
+            "hist_vel_10hz": [list(v) for v in self.history_velocity],
+            "hist_acc_10hz": [list(a) for a in self.history_acceleration],
             # Planning expert input: [vx, vy, ax, ay, *driving_command]
             "expert_ego_vector": list(self.velocity) + list(self.acceleration)
             + self.command_one_hot(),
@@ -115,15 +137,30 @@ class EgoStateExtractor:
             return None
         return np.linalg.inv(T_cur) @ T_oth
 
+    def _pose(self, frame_idx: int, k: int) -> Optional[list[float]]:
+        T = self._relative(frame_idx, frame_idx + k)
+        if T is None:
+            return None
+        xy = _cam_to_ego_xy(T[:3, 3])
+        return [float(xy[0]), float(xy[1]), _heading_in(T)]
+
     def _path(self, frame_idx: int, offsets: range) -> Optional[np.ndarray]:
-        pts = []
-        for k in offsets:
-            T = self._relative(frame_idx, frame_idx + k)
-            if T is None:
-                return None
-            xy = _cam_to_ego_xy(T[:3, 3])
-            pts.append([float(xy[0]), float(xy[1]), _heading_in(T)])
+        pts = [self._pose(frame_idx, k) for k in offsets]
+        if any(p is None for p in pts):
+            return None
         return np.array(pts, dtype=np.float64)
+
+    def _future(self, frame_idx: int) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        pts = [self._pose(frame_idx, k) for k in range(1, self.n_future + 1)]
+        valid = np.array([p is not None for p in pts], dtype=np.int64)
+        if not valid.any():
+            return None, None
+        last = None
+        filled = []
+        for p in pts:                 # pad the end of a drive with the last real pose
+            last = p if p is not None else last
+            filled.append(last if last is not None else [0.0, 0.0, 0.0])
+        return np.array(filled, dtype=np.float64), valid
 
     def _derive_command(self, future: Optional[np.ndarray], speed: float) -> tuple[str, Optional[float]]:
         if future is None or len(future) == 0:
@@ -146,22 +183,40 @@ class EgoStateExtractor:
     def get(self, frame_idx: int) -> Optional[EgoState]:
         """EgoState for frame_idx, or None if poses don't cover the needed past."""
         dt = 1.0 / self.fps
+        # 16 poses over 1.5 s: offsets -15 … 0
         hist = self._path(frame_idx, range(-self.n_hist, 1))
         if hist is None:
             return None
-        future = self._path(frame_idx, range(1, self.n_future + 1))
+        future, future_valid = self._future(frame_idx)
 
-        # Velocity: central difference when the next frame is known, else backward
-        p_prev = hist[-2, :2]
-        p_prev2 = hist[-3, :2]
+        # Velocity / acceleration by finite differences over the history, with
+        # up to two extra poses on each side (acceleration differences the
+        # velocity again, so central differences need two).
+        before = []
+        for k in (-self.n_hist - 1, -self.n_hist - 2):
+            p = self._pose(frame_idx, k)
+            if p is None:
+                break
+            before.insert(0, p)
+        after = []
         if future is not None:
-            v = (future[0, :2] - p_prev) / (2 * dt)
-            a = (future[0, :2] - 2 * hist[-1, :2] + p_prev) / dt ** 2
-        else:
-            v = (hist[-1, :2] - p_prev) / dt
-            a = (hist[-1, :2] - 2 * p_prev + p_prev2) / dt ** 2
+            for i in range(min(2, len(future))):
+                if not future_valid[i]:
+                    break
+                after.append(future[i].tolist())
+        series = np.asarray(before + hist.tolist() + after)
+        start = len(before)
+        vel = np.gradient(series[:, :2], dt, axis=0)
+        acc = np.gradient(vel, dt, axis=0)
+        vel, acc = vel[start:start + len(hist)], acc[start:start + len(hist)]
+        # Express each in the body frame of its own timestamp
+        c, s_ = np.cos(hist[:, 2]), np.sin(hist[:, 2])
+        rot = lambda q: np.stack([c * q[:, 0] + s_ * q[:, 1], -s_ * q[:, 0] + c * q[:, 1]], 1)
+        vel_b, acc_b = rot(vel), rot(acc)
+        v, a = vel_b[-1], acc_b[-1]           # current heading is 0
         speed = float(np.linalg.norm(v))
-        command, dh = self._derive_command(future, speed)
+        valid_future = None if future is None else future[: int(future_valid.cumprod().sum())]
+        command, dh = self._derive_command(valid_future, speed)
 
         return EgoState(
             frame_idx=frame_idx,
@@ -172,4 +227,7 @@ class EgoStateExtractor:
             future=future.tolist() if future is not None else None,
             command=command,
             command_heading_change=dh,
+            history_velocity=vel_b.tolist(),
+            history_acceleration=acc_b.tolist(),
+            future_valid=future_valid.tolist() if future_valid is not None else None,
         )

@@ -174,23 +174,33 @@ def _parse_r_rect_360(path: str) -> np.ndarray:
     return np.eye(3, dtype=np.float32)
 
 
-def _parse_cam_to_pose_360(path: str) -> np.ndarray:
-    """Parse image_00 entry from calib_cam_to_pose.txt → 4×4 matrix."""
+def _parse_cam_to_pose_360(path: str, camera: str = "image_00") -> np.ndarray:
+    """Parse one camera's entry from calib_cam_to_pose.txt → 4×4 matrix.
+
+    KITTI-360 writes each camera on one line: ``image_00: r11 r12 r13 tx ...``
+    (12 numbers, as read by kitti360scripts). Values continuing on the
+    following lines are accepted too. Raises instead of falling back to
+    identity: an identity camera→IMU transform swaps the IMU axes (x forward,
+    z up) for the camera's (z forward, y down) and breaks ego-motion
+    compensation.
+    """
     with open(path) as f:
         lines = f.readlines()
     for i, line in enumerate(lines):
-        if line.strip().startswith("image_00"):
-            vals: list[str] = []
-            for j in range(i + 1, min(i + 6, len(lines))):
-                row = lines[j].strip()
-                if row and not row[0].isalpha():
-                    vals.extend(row.split())
-                if len(vals) >= 12:
-                    break
+        stripped = line.strip()
+        if not stripped.startswith(camera + ":"):
+            continue
+        vals: list[str] = stripped.split(":", 1)[1].split()
+        for row in lines[i + 1:i + 4]:
             if len(vals) >= 12:
-                mat = np.array(vals[:12], dtype=np.float32).reshape(3, 4)
-                T = np.eye(4, dtype=np.float32)
-                T[:3, :] = mat
-                return T
-    logger.warning(f"image_00 not found in {path}, using identity")
-    return np.eye(4, dtype=np.float32)
+                break
+            row = row.strip()
+            if not row or row[0].isalpha():
+                break
+            vals.extend(row.split())
+        if len(vals) < 12:
+            raise ValueError(f"{path}: {camera} has {len(vals)} values, expected 12")
+        T = np.eye(4, dtype=np.float32)
+        T[:3, :] = np.array(vals[:12], dtype=np.float32).reshape(3, 4)
+        return T
+    raise ValueError(f"{path}: no entry for {camera}")

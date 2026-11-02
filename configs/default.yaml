@@ -126,3 +126,22 @@ planning:
     agent_margin: 0.5
     obstacle_min_height: 0.3
     obstacle_max_height: 2.5
+  # Qwen-Drive planner (optional). Two routes:
+  #  - predictions: path to Qwen-Drive's predictions.jsonl, made by
+  #    scripts/export_qwen_drive_scenes.py + Qwen-Drive's run_planning.py in
+  #    its own environment (it pins torch 2.8 / transformers 5.x)
+  #  - live: run it in-process (only if qwen_drive installs alongside this
+  #    project; needs ~11 GB extra GPU memory next to the perception models)
+  qwen_drive:
+    predictions: null
+    live: false
+    model_path: "Qwen-Drive-1.0-4B"
+    planner_path: "Qwen-Drive-1.0-4B/planner-rl"   # planner-sft for direct_planning
+    mode: "reasoning_planning"
+    num_samples: 1
+    dtype: "auto"                 # bf16 if supported, else fp16 (T4)
+    attn_implementation: "sdpa"   # flash_attention_2 on Ampere+ only
+    every: 10                     # live mode: plan every N frames
+    side_mode: "fisheye"          # fisheye | front_crop | blank (see planning/kitti360_views.py)
+    side_yaw_deg: 55.0
+    side_hfov_deg: 75.0

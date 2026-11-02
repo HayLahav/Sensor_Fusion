@@ -420,7 +420,9 @@ def main() -> int:
         if ego_comp is None:
             print("[inference] WARNING: planning audit needs KITTI-360 poses — skipped")
         else:
-            from fusion_perception.planning.audit import DrivenPathAudit
+            from fusion_perception.planning.audit import (
+                LivePlannerSource, PlanningAudit, PredictionsFileSource,
+            )
             from fusion_perception.planning.bev_check import BEVCheckConfig
             from fusion_perception.planning.ego_state import EgoStateExtractor
             extractor = EgoStateExtractor(
@@ -430,9 +432,44 @@ def main() -> int:
             chk = dict(pl_cfg.get("bev_check", {}) or {})
             if "ego_disc_offsets" in chk:
                 chk["ego_disc_offsets"] = tuple(chk["ego_disc_offsets"])
-            plan_audit = DrivenPathAudit(extractor, BEVCheckConfig(**chk),
-                                         every=int(pl_cfg.get("every", 1)))
-            print("[inference] Planning audit on (ego state + BEV check of driven path)")
+            # Qwen-Drive plans: from a predictions file (two-environment route)
+            # or the in-process planner.
+            plan_source = None
+            qd = pl_cfg.get("qwen_drive", None) or {}
+            try:
+                if qd.get("predictions"):
+                    plan_source = PredictionsFileSource(qd.predictions, args.kitti360_seq)
+                    print(f"[inference] Qwen-Drive plans from {qd.predictions}")
+                elif qd.get("live", False):
+                    from fusion_perception.models.qwen_drive_wrapper import QwenDrivePlanner
+                    from fusion_perception.planning.kitti360_views import Kitti360ViewRenderer
+                    planner = QwenDrivePlanner(
+                        model_path=qd.get("model_path", "Qwen-Drive-1.0-4B"),
+                        planner_path=qd.get("planner_path", "Qwen-Drive-1.0-4B/planner-rl"),
+                        mode=qd.get("mode", "reasoning_planning"),
+                        num_samples=int(qd.get("num_samples", 1)),
+                        dtype=qd.get("dtype", "auto"),
+                        attn_implementation=qd.get("attn_implementation", "sdpa"),
+                        device=qd.get("device", "cuda"),
+                    )
+                    planner.load()
+                    renderer = Kitti360ViewRenderer(
+                        args.kitti360_root, args.kitti360_seq,
+                        side_mode=qd.get("side_mode", "fisheye"),
+                        side_yaw_deg=float(qd.get("side_yaw_deg", 55.0)),
+                        side_hfov_deg=float(qd.get("side_hfov_deg", 75.0)),
+                    )
+                    plan_source = LivePlannerSource(planner, renderer, fps=extractor.fps,
+                                                    every=int(qd.get("every", 10)))
+                    print("[inference] Qwen-Drive planner loaded (in-process)")
+            except Exception as e:
+                plan_source = None
+                print(f"[inference] WARNING: Qwen-Drive planning disabled: {e}")
+            plan_audit = PlanningAudit(extractor, BEVCheckConfig(**chk),
+                                       every=int(pl_cfg.get("every", 1)),
+                                       plan_source=plan_source)
+            print("[inference] Planning audit on (ego state + BEV check of driven path"
+                  + (" and Qwen-Drive plans)" if plan_source is not None else ")"))
 
     # ── Pass 1: Detection + tracking ─────────────────────────────────────────
     print(f"\n[Pass 1] detection + tracking ({_total} total frames)...")
@@ -510,6 +547,13 @@ def main() -> int:
         print(f"[Planning] driven path flagged on {100 * summ['false_alarm_rate']:.1f}% of "
               f"{summ['frames_checked']} frames ({rates or 'none'}); "
               f"commands {summ['commands']} → {out_dir / 'planning.json'}")
+        if "planner" in summ:
+            ps = summ["planner"]
+            prates = ", ".join(f"{k} {100 * v:.1f}%" for k, v in ps["flag_rate_by_kind"].items())
+            mets = ", ".join(f"{k} {v:.2f} m" for k, v in ps["metrics_first_sample"].items()
+                             if k.startswith("ADE") or k == "FDE@3s")
+            print(f"[Planning] Qwen-Drive: {ps['frames']} frames, flagged "
+                  f"{100 * ps['flag_rate']:.1f}% ({prates or 'none'}); {mets}")
 
     # ── Free GPU ──────────────────────────────────────────────────────────────
     detector.unload()
