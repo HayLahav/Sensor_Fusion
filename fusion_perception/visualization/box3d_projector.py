@@ -11,6 +11,7 @@ box_3d format (10 elements from WildDet3D):
 from __future__ import annotations
 import cv2
 import numpy as np
+from fusion_perception.utils.projection import as_projection
 
 # 12 wireframe edges: top face + bottom face + 4 vertical pillars
 _EDGES = [
@@ -55,11 +56,14 @@ def box3d_corners(box3d: list[float]) -> np.ndarray:
 def project_box3d(
     frame: np.ndarray,
     box3d: list[float],
-    K: np.ndarray,
+    K,
     color: tuple[int, int, int],
     thickness: int = 2,
 ) -> None:
-    """Draw a 3D bounding box wireframe onto frame (in-place)."""
+    """Draw a 3D bounding box wireframe onto frame (in-place).
+
+    K may be a 3x3 intrinsics array (pinhole) or a CameraProjection.
+    """
     # Skip objects closer than 2 m — projection becomes degenerate and huge
     if box3d[2] < 2.0:
         return
@@ -68,8 +72,10 @@ def project_box3d(
     if np.any(corners[:, 2] <= 0.1):
         return
 
-    pts_h = (K.astype(np.float32) @ corners.T).T   # [8, 3]
-    pts2d = (pts_h[:, :2] / pts_h[:, 2:3]).astype(np.int32)  # [8, 2]
+    uv, valid = as_projection(K).project(corners)
+    if not valid.all():
+        return
+    pts2d = uv.astype(np.int32)  # [8, 2]
 
     h_img, w_img = frame.shape[:2]
 

@@ -16,7 +16,7 @@ from fusion_perception.utils.dataclasses import (
 from fusion_perception.utils.geometry import world_to_grid
 
 # NumPy >= 2.0 renamed np.trapz -> np.trapezoid; support both.
-_trapz = getattr(np, "trapezoid", np.trapz)
+_trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 
 
 # ---------------------------------------------------------------------------
@@ -276,3 +276,49 @@ def compute_occupancy_iou(
     intersection = float((pred_binary & gt_binary).sum())
     union = float((pred_binary | gt_binary).sum())
     return intersection / union if union > 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Trajectory — ADE / FDE with a pass/fail gate (open-loop evaluation)
+# ---------------------------------------------------------------------------
+
+def compute_trajectory_metrics(
+    predicted: dict,
+    ground_truth: dict,
+    horizon: int | None = None,
+) -> dict:
+    """Average / Final Displacement Error over matching trajectories.
+
+    Args:
+        predicted, ground_truth: {key: [[x, z], ...]} where key is e.g. a
+            track id or a sample index. Only shared keys are scored; each pair
+            is compared over min(len) steps (optionally capped by `horizon`).
+
+    Returns:
+        {"ade": float, "fde": float, "n": int}; ade/fde are 0.0 when n == 0.
+    """
+    ades: list[float] = []
+    fdes: list[float] = []
+    for key in set(predicted) & set(ground_truth):
+        p = np.asarray(predicted[key], dtype=np.float64).reshape(-1, 2)
+        g = np.asarray(ground_truth[key], dtype=np.float64).reshape(-1, 2)
+        n = min(len(p), len(g))
+        if horizon is not None:
+            n = min(n, horizon)
+        if n == 0:
+            continue
+        d = np.linalg.norm(p[:n] - g[:n], axis=1)
+        ades.append(float(d.mean()))
+        fdes.append(float(d[-1]))
+    if not ades:
+        return {"ade": 0.0, "fde": 0.0, "n": 0}
+    return {"ade": float(np.mean(ades)), "fde": float(np.mean(fdes)), "n": len(ades)}
+
+
+def trajectory_gate(
+    metrics: dict,
+    max_ade: float = 2.0,
+    max_fde: float = 4.0,
+) -> bool:
+    """True when ADE and FDE are within thresholds (and something was scored)."""
+    return metrics.get("n", 0) > 0 and metrics["ade"] < max_ade and metrics["fde"] < max_fde
