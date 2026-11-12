@@ -73,14 +73,30 @@ Video / KITTI-360 sequence
 | 3D Detector | `fusion_perception/models/wilddet3d_wrapper.py` | [WildDet3D](https://github.com/allenai/WildDet3D) — open-vocabulary monocular 3D detection via text prompts |
 | 2D Detector | `fusion_perception/models/yolo26_detector.py` | YOLO26 2D detector fused with WildDet3D boxes via IoU |
 | Tracker | `fusion_perception/tracking/kalman_cowtracker.py` | Kalman filter + [CoWTracker](https://github.com/facebookresearch/co-tracker) visual tracking; ByteTrack two-stage association |
-| Ego-motion | `fusion_perception/tracking/ego_motion.py` | Pose-based 3D ego-motion compensation from KITTI-360 `poses.txt` |
-| BEV Grid | `fusion_perception/occupancy/bev_grid.py` | Bird's-eye-view occupancy: exponential decay → LiDAR rasterisation → track centroids |
+| Ego-motion | `fusion_perception/tracking/ego_motion.py` | Pose-based 3D ego-motion compensation from KITTI-360 `poses.txt`; `EgoMotionHistory` keeps a rolling `(steps, 4)` array of speed · acceleration · yaw rate · curvature |
+| BEV Grid | `fusion_perception/occupancy/bev_grid.py` | Bird's-eye-view occupancy: exponential decay → LiDAR rasterisation → track centroids; `get_semantic_channels()` returns a one-hot `(C, rows, cols)` semantic raster |
+| Projection | `fusion_perception/utils/projection.py` | `PinholeProjection` / `FisheyeProjection` operators; `project_box3d` accepts a 3×3 `K` or a projection object |
 | Road Segmentor | `fusion_perception/segmentation/road_segmentor.py` | YOLO26n-sem Cityscapes semantic labels projected onto BEV |
 | Depth | `fusion_perception/depth/` | Depth-Anything-V2 monocular depth with LiDAR frustum anchoring and quality gate |
 | Reasoner | `fusion_perception/models/gemma_wrapper.py` | Gemma 4 2B-IT with 4-bit quantisation; rolling scene-memory context |
 | Prompt Builder | `fusion_perception/reasoning/prompt_builder.py` | Converts `SceneMemory` snapshots to structured scene descriptions |
 | Data Loader | `fusion_perception/data/` | KITTI-360 frames, raw KITTI LiDAR, calibration, GT labels |
-| Evaluation | `fusion_perception/evaluation/` | mAP · MOTA / MOTP · occupancy IoU; cross-dataset benchmark |
+| Evaluation | `fusion_perception/evaluation/` | mAP · MOTA / MOTP · occupancy IoU · ADE / FDE with pass/fail gate; cross-dataset benchmark |
+
+---
+
+## Ideas adapted from auto_e2e
+
+Several design ideas come from [autowarefoundation/auto_e2e](https://github.com/autowarefoundation/auto_e2e), an end-to-end driving model. Only the ideas were adopted; no code or weights were copied.
+
+| Idea | Where it landed |
+|------|-----------------|
+| Camera geometry as a projection operator, not a bare matrix | `utils/projection.py` |
+| Gated open-loop evaluation (ADE / FDE) | `evaluation/metrics.py` |
+| Ego-motion history as conditioning input | `EgoMotionHistory` in `tracking/ego_motion.py` |
+| Multi-channel semantic raster of the BEV | `sem_grid_to_channels` in `occupancy/bev_grid.py` |
+
+**Licensing:** the auto_e2e code is Apache-2.0, but its checkpoints are CC BY-NC-SA 4.0 (non-commercial), as are the datasets they were trained on (nuPlan, KITScenes). KITTI-360 is also non-commercial. Check these terms before any commercial use.
 
 ---
 
@@ -247,6 +263,7 @@ Metrics reported per dataset and per log:
 | **MOTA** | Multi-object tracking accuracy (CLEAR MOT) |
 | **MOTP** | Multi-object tracking precision (mean BEV centre distance) |
 | **Occ IoU** | Binary occupancy grid IoU vs. ground-truth LiDAR |
+| **ADE / FDE** | Average / final displacement error of trajectories (metres). `trajectory_gate()` passes when ADE < 2 m and FDE < 4 m (configurable) |
 
 Requires `PY123D_DATA_ROOT` pointing to your datasets directory.
 
