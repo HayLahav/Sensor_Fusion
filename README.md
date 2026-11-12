@@ -85,21 +85,6 @@ Video / KITTI-360 sequence
 
 ---
 
-## Ideas adapted from auto_e2e
-
-Several design ideas come from [autowarefoundation/auto_e2e](https://github.com/autowarefoundation/auto_e2e), an end-to-end driving model. Only the ideas were adopted; no code or weights were copied.
-
-| Idea | Where it landed |
-|------|-----------------|
-| Camera geometry as a projection operator, not a bare matrix | `utils/projection.py` |
-| Gated open-loop evaluation (ADE / FDE) | `evaluation/metrics.py` |
-| Ego-motion history as conditioning input | `EgoMotionHistory` in `tracking/ego_motion.py` |
-| Multi-channel semantic raster of the BEV | `sem_grid_to_channels` in `occupancy/bev_grid.py` |
-
-**Licensing:** the auto_e2e code is Apache-2.0, but its checkpoints are CC BY-NC-SA 4.0 (non-commercial), as are the datasets they were trained on (nuPlan, KITScenes). KITTI-360 is also non-commercial. Check these terms before any commercial use.
-
----
-
 ## Quickstart
 
 ### 1 — Install
