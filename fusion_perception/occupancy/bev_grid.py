@@ -85,6 +85,23 @@ def _compute_warp_matrix(
                        [c, d, row_off]])
 
 
+DEFAULT_RASTER_CLASSES: tuple[int, ...] = (0, 1, 8, 9, 11, 12, 13, 14, 15, 17, 18)
+
+
+def sem_grid_to_channels(
+    sem_grid,
+    class_ids: tuple[int, ...] = DEFAULT_RASTER_CLASSES,
+) -> np.ndarray:
+    """One-hot semantic BEV raster of shape (C, rows, cols), float32.
+
+    Channel i is 1.0 where sem_grid == class_ids[i]. A multi-channel raster
+    (like auto_e2e's semantic_raster) is easier to feed to a learned model than
+    a single label map.
+    """
+    arr = np.asarray(sem_grid)
+    return np.stack([(arr == c) for c in class_ids], axis=0).astype(np.float32)
+
+
 class OccupancyBEVGenerator:
     """Stateful BEV occupancy + semantic + motion grid. Call update() once per frame."""
 
@@ -224,6 +241,12 @@ class OccupancyBEVGenerator:
             sem_summary=sem_summary,
             motion_grid=motion_grid_np.tolist() if motion_grid_np is not None else None,
         )
+
+    def get_semantic_channels(
+        self, class_ids: tuple[int, ...] = DEFAULT_RASTER_CLASSES,
+    ) -> np.ndarray:
+        """Current semantic grid as a (C, rows, cols) one-hot raster."""
+        return sem_grid_to_channels(self._sem_grid, class_ids)
 
     def get_freespace_mask(self) -> np.ndarray:
         return self._grid <= 0.5

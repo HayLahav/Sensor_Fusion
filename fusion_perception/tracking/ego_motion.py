@@ -113,3 +113,45 @@ class PoseEgoCompensation:
 
         self._T_world_to_rectcam_prev = T_curr
         return T_ego
+
+
+class EgoMotionHistory:
+    """Rolling history of [speed, acceleration, yaw_rate, curvature].
+
+    Fed with the per-frame T_ego from PoseEgoCompensation (cam_{t-1} -> cam_t).
+    Gives a fixed-size (steps, 4) array usable as conditioning input for a
+    motion/trajectory predictor. Older, not-yet-filled rows are zero.
+    """
+
+    def __init__(self, steps: int = 16, dt: float = 0.1) -> None:
+        self.steps = steps
+        self.dt = dt
+        self._rows: list[list[float]] = []
+        self._prev_speed: Optional[float] = None
+
+    def update(self, T_ego: Optional[np.ndarray], dt: Optional[float] = None) -> None:
+        if T_ego is None:
+            return
+        dt = dt or self.dt
+        # T_ego maps old-cam points into new-cam: ego displacement is its inverse.
+        T_motion = np.linalg.inv(T_ego)
+        t = T_motion[:3, 3]
+        dist = float(np.hypot(t[0], t[2]))
+        speed = dist / dt
+        yaw = float(np.arctan2(T_motion[0, 2], T_motion[2, 2]))  # rotation about y
+        yaw_rate = yaw / dt
+        accel = 0.0 if self._prev_speed is None else (speed - self._prev_speed) / dt
+        curvature = yaw / dist if dist > 1e-3 else 0.0
+        self._prev_speed = speed
+        self._rows.append([speed, accel, yaw_rate, curvature])
+        self._rows = self._rows[-self.steps:]
+
+    def as_array(self) -> np.ndarray:
+        out = np.zeros((self.steps, 4), dtype=np.float32)
+        if self._rows:
+            out[-len(self._rows):] = np.asarray(self._rows, dtype=np.float32)
+        return out
+
+    def reset(self) -> None:
+        self._rows.clear()
+        self._prev_speed = None
